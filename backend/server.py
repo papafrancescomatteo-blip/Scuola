@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Response, Request
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Response, Request, UploadFile, File
 from fastapi.security import HTTPBearer
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -13,6 +13,8 @@ from datetime import datetime, timezone, timedelta
 import bcrypt
 import jwt
 import httpx
+import io
+from datetime import date as date_type
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -404,6 +406,191 @@ async def get_instruments_by_barcode(barcode: str, current_user: dict = Depends(
             inst["matricola"] = inst.get("barcode", "N/A")
     
     return instruments
+
+# ============== EXCEL IMPORT ==============
+
+IMPORT_COLUMNS = [
+    ("barcode", "Codice a barre"),
+    ("matricola", "Matricola"),
+    ("name", "Nome"),
+    ("description", "Descrizione"),
+    ("category", "Categoria"),
+    ("location", "Ubicazione"),
+    ("calibration_date", "Data taratura"),
+    ("calibration_expiry", "Scadenza taratura"),
+    ("image_url", "URL immagine"),
+]
+
+# Nomi di colonna accettati (in minuscolo) per ogni campo
+IMPORT_ALIASES = {
+    "barcode": ["codice a barre", "codice", "barcode", "codice barre"],
+    "matricola": ["matricola", "seriale", "numero di serie", "serial"],
+    "name": ["nome", "strumento", "name", "nome strumento"],
+    "description": ["descrizione", "description"],
+    "category": ["categoria", "category"],
+    "location": ["ubicazione", "posizione", "location"],
+    "calibration_date": ["data taratura", "data calibrazione", "calibration_date", "taratura"],
+    "calibration_expiry": ["scadenza taratura", "scadenza calibrazione", "scadenza", "calibration_expiry"],
+    "image_url": ["url immagine", "immagine", "image_url", "foto"],
+}
+
+def _cell_to_text(value) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date_type):
+        return value.isoformat()
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    text = str(value).strip()
+    return text or None
+
+def _normalize_date(text: Optional[str]) -> Optional[str]:
+    """Converte date tipo 31/12/2026 in 2026-12-31; lascia invariato il resto."""
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(text, fmt).date().isoformat()
+        except ValueError:
+            continue
+    return text
+
+@api_router.get("/instruments/import/template")
+async def import_template(current_user: dict = Depends(require_admin_or_technician)):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Strumenti"
+    ws.append([label for _, label in IMPORT_COLUMNS])
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="1E3A8A")
+    ws.append(["121234567890", "MCEX-001", "Micrometro esterno 0-25 mm", "Esempio di descrizione",
+               "Misurazione", "Armadio A", "2026-01-15", "2027-01-15", ""])
+    widths = [20, 16, 32, 36, 18, 18, 18, 18, 30]
+    for i, w in enumerate(widths):
+        ws.column_dimensions[chr(65 + i)].width = w
+    # Codice a barre, matricola e date come testo, per non perdere zeri e formato
+    for col in ("A", "B", "G", "H"):
+        for row in range(2, 502):
+            ws[f"{col}{row}"].number_format = "@"
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="modello_strumenti.xlsx"'},
+    )
+
+@api_router.post("/instruments/import/preview")
+async def import_preview(file: UploadFile = File(...), current_user: dict = Depends(require_admin_or_technician)):
+    from openpyxl import load_workbook
+    content = await file.read()
+    if len(content) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="File troppo grande (massimo 5 MB)")
+    try:
+        wb = load_workbook(io.BytesIO(content), data_only=True, read_only=True)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Il file non è un Excel valido (.xlsx)")
+
+    ws = wb.active
+    rows_iter = ws.iter_rows(values_only=True)
+    header = next(rows_iter, None)
+    if not header:
+        raise HTTPException(status_code=400, detail="Il file è vuoto")
+
+    # Associa le colonne ai campi
+    col_index = {}
+    for idx, title in enumerate(header):
+        t = (str(title).strip().lower() if title is not None else "")
+        for field, aliases in IMPORT_ALIASES.items():
+            if t in aliases and field not in col_index:
+                col_index[field] = idx
+    missing = [label for field, label in IMPORT_COLUMNS if field in ("barcode", "matricola", "name") and field not in col_index]
+    if missing:
+        raise HTTPException(status_code=400, detail="Colonne obbligatorie mancanti: " + ", ".join(missing))
+
+    parsed = []
+    for row_number, row in enumerate(rows_iter, start=2):
+        if row is None or all(c is None or str(c).strip() == "" for c in row):
+            continue
+        if len(parsed) >= 2000:
+            raise HTTPException(status_code=400, detail="Troppe righe (massimo 2000)")
+        data = {}
+        for field, _ in IMPORT_COLUMNS:
+            idx = col_index.get(field)
+            data[field] = _cell_to_text(row[idx]) if idx is not None and idx < len(row) else None
+        data["calibration_date"] = _normalize_date(data["calibration_date"])
+        data["calibration_expiry"] = _normalize_date(data["calibration_expiry"])
+        parsed.append({"row": row_number, "data": data})
+    wb.close()
+
+    existing = set()
+    matricole = [r["data"]["matricola"] for r in parsed if r["data"]["matricola"]]
+    if matricole:
+        async for doc in db.instruments.find({"matricola": {"$in": matricole}}, {"_id": 0, "matricola": 1}):
+            existing.add(doc["matricola"])
+
+    seen = set()
+    result = []
+    for r in parsed:
+        d = r["data"]
+        status, message = "new", ""
+        if not d["barcode"] or not d["matricola"] or not d["name"]:
+            status, message = "error", "Mancano codice a barre, matricola o nome"
+        elif d["matricola"] in existing:
+            status, message = "duplicate", "Matricola già presente nel sistema"
+        elif d["matricola"] in seen:
+            status, message = "duplicate", "Matricola ripetuta nel file"
+        else:
+            seen.add(d["matricola"])
+        result.append({"row": r["row"], "data": d, "status": status, "message": message})
+
+    return {
+        "rows": result,
+        "counts": {
+            "new": sum(1 for r in result if r["status"] == "new"),
+            "duplicate": sum(1 for r in result if r["status"] == "duplicate"),
+            "error": sum(1 for r in result if r["status"] == "error"),
+        },
+    }
+
+class ImportConfirm(BaseModel):
+    rows: List[InstrumentCreate]
+
+@api_router.post("/instruments/import/confirm")
+async def import_confirm(payload: ImportConfirm, current_user: dict = Depends(require_admin_or_technician)):
+    imported, skipped = 0, 0
+    seen = set()
+    for item in payload.rows:
+        if not item.barcode or not item.matricola or not item.name or item.matricola in seen:
+            skipped += 1
+            continue
+        if await db.instruments.find_one({"matricola": item.matricola}, {"_id": 1}):
+            skipped += 1
+            continue
+        seen.add(item.matricola)
+        await db.instruments.insert_one({
+            "instrument_id": f"inst_{uuid.uuid4().hex[:12]}",
+            "barcode": item.barcode,
+            "matricola": item.matricola,
+            "name": item.name,
+            "description": item.description,
+            "image_url": item.image_url,
+            "status": "available",
+            "location": item.location,
+            "calibration_date": item.calibration_date,
+            "calibration_expiry": item.calibration_expiry,
+            "category": item.category,
+            "current_holder": None,
+            "current_destination": None,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+        imported += 1
+    return {"imported": imported, "skipped": skipped}
 
 @api_router.get("/instruments/{instrument_id}")
 async def get_instrument(instrument_id: str, current_user: dict = Depends(get_current_user)):
