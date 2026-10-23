@@ -59,37 +59,71 @@ export default function SearchPage({ user, token, logout }) {
     setResults([]);
     setError("");
 
+    // Attende che React disegni il riquadro "barcode-scanner" prima di avviare la fotocamera
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
     try {
-      if (!html5QrcodeRef.current) {
-        html5QrcodeRef.current = new Html5Qrcode("barcode-scanner");
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error("NO_CAMERA_API");
       }
+
+      // Chiude un'eventuale istanza precedente e ne crea una nuova sul riquadro attuale
+      if (html5QrcodeRef.current) {
+        try {
+          if (html5QrcodeRef.current.isScanning) {
+            await html5QrcodeRef.current.stop();
+          }
+          html5QrcodeRef.current.clear();
+        } catch (e) {
+          console.error(e);
+        }
+        html5QrcodeRef.current = null;
+      }
+      html5QrcodeRef.current = new Html5Qrcode("barcode-scanner");
 
       const config = {
         fps: 10,
-        qrbox: { width: 300, height: 150 },
-        aspectRatio: 1.7777778,
-        formatsToSupport: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]
+        qrbox: { width: 250, height: 150 }
       };
 
-      await html5QrcodeRef.current.start(
-        { facingMode: "environment" },
-        config,
-        (decodedText) => {
-          setBarcode(decodedText);
-          stopCameraScanner();
-          searchByBarcode(decodedText);
-        },
-        () => {}
-      );
+      const onScanSuccess = (decodedText) => {
+        setBarcode(decodedText);
+        stopCameraScanner();
+        searchByBarcode(decodedText);
+      };
+
+      try {
+        await html5QrcodeRef.current.start(
+          { facingMode: "environment" },
+          config,
+          onScanSuccess,
+          () => {}
+        );
+      } catch (firstErr) {
+        // Se la fotocamera posteriore non è disponibile, prova con qualsiasi fotocamera
+        const cameras = await Html5Qrcode.getCameras();
+        if (!cameras || cameras.length === 0) throw firstErr;
+        await html5QrcodeRef.current.start(
+          cameras[cameras.length - 1].id,
+          config,
+          onScanSuccess,
+          () => {}
+        );
+      }
     } catch (err) {
       console.error("Scanner error:", err);
-      setScannerError(
-        err.message?.includes("Permission") 
-          ? "Permesso fotocamera negato. Abilita la fotocamera nelle impostazioni del browser."
-          : "Errore nell'avvio dello scanner. Verifica che il browser supporti l'accesso alla fotocamera."
-      );
+      const msg = String(err && (err.message || err));
+      let text = "Errore nell'avvio dello scanner. Verifica che il browser supporti l'accesso alla fotocamera.";
+      if (/permission|denied|NotAllowed/i.test(msg)) {
+        text = "Permesso fotocamera negato. Abilita la fotocamera per questo sito nelle impostazioni del browser e riprova.";
+      } else if (/NotFound|no camera|Requested device not found/i.test(msg) || msg === "NO_CAMERA_API") {
+        text = "Nessuna fotocamera disponibile su questo dispositivo, oppure il sito non è aperto in modo sicuro (https).";
+      } else if (/NotReadable|in use|Could not start/i.test(msg)) {
+        text = "La fotocamera è usata da un'altra app. Chiudila e riprova.";
+      }
+      setScannerError(text);
+      // Il riquadro resta aperto così l'errore è visibile; scannerActive false nasconde solo il video
       setScannerActive(false);
-      setScanMode(null);
     }
   };
 
@@ -102,6 +136,7 @@ export default function SearchPage({ user, token, logout }) {
       }
     }
     setScannerActive(false);
+    setScanMode(null);
   };
 
   const startReaderMode = () => {
