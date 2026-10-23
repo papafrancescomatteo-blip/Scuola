@@ -46,7 +46,12 @@ import {
   User,
   Search,
   MapPin,
-  Hash
+  Hash,
+  FileSpreadsheet,
+  Download,
+  Upload,
+  CheckCircle,
+  AlertTriangle
 } from "lucide-react";
 import { API } from "../App";
 
@@ -74,6 +79,14 @@ export default function AdminPanel({ user, token, logout }) {
   });
   const [instrumentLoading, setInstrumentLoading] = useState(false);
   
+  // Excel Import State
+  const [showImportDialog, setShowImportDialog] = useState(false);
+  const [importPreview, setImportPreview] = useState(null);
+  const [importFileName, setImportFileName] = useState("");
+  const [importLoading, setImportLoading] = useState(false);
+  const [importError, setImportError] = useState("");
+  const [importResult, setImportResult] = useState(null);
+
   // User Dialog State
   const [showUserDialog, setShowUserDialog] = useState(false);
   const [editingUser, setEditingUser] = useState(null);
@@ -125,6 +138,93 @@ export default function AdminPanel({ user, token, logout }) {
   useEffect(() => {
     fetchData();
   }, [token]);
+
+  // Excel Import
+  const openImportDialog = () => {
+    setImportPreview(null);
+    setImportFileName("");
+    setImportError("");
+    setImportResult(null);
+    setShowImportDialog(true);
+  };
+
+  const downloadImportTemplate = async () => {
+    try {
+      const response = await fetch(`${API}/instruments/import/template`, {
+        headers: { Authorization: `Bearer ${token}` },
+        credentials: "include"
+      });
+      if (!response.ok) throw new Error("download");
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "modello_strumenti.xlsx";
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setImportError("Impossibile scaricare il modello. Riprova.");
+    }
+  };
+
+  const handleImportFile = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    setImportError("");
+    setImportResult(null);
+    setImportPreview(null);
+    setImportFileName(file.name);
+    setImportLoading(true);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const response = await fetch(`${API}/instruments/import/preview`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        credentials: "include",
+        body: formData
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        setImportError(typeof data.detail === "string" ? data.detail : "Impossibile leggere il file");
+      } else {
+        setImportPreview(data);
+      }
+    } catch (err) {
+      setImportError("Errore di connessione. Riprova tra qualche istante.");
+    } finally {
+      setImportLoading(false);
+    }
+  };
+
+  const confirmImport = async () => {
+    if (!importPreview) return;
+    const rows = importPreview.rows.filter((r) => r.status === "new").map((r) => r.data);
+    if (rows.length === 0) return;
+    setImportLoading(true);
+    setImportError("");
+    try {
+      const response = await fetch(`${API}/instruments/import/confirm`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        credentials: "include",
+        body: JSON.stringify({ rows })
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        setImportError(typeof data.detail === "string" ? data.detail : "Importazione non riuscita");
+      } else {
+        setImportResult(data);
+        setImportPreview(null);
+        fetchData();
+      }
+    } catch (err) {
+      setImportError("Errore di connessione. Riprova tra qualche istante.");
+    } finally {
+      setImportLoading(false);
+    }
+  };
 
   // Instrument CRUD
   const handleSaveInstrument = async () => {
@@ -404,7 +504,7 @@ export default function AdminPanel({ user, token, logout }) {
                         Codice a barre = tipo strumento, Matricola = identificativo univoco
                       </CardDescription>
                     </div>
-                    <div className="flex gap-3">
+                    <div className="flex flex-wrap gap-3">
                       <div className="relative">
                         <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
                         <Input
@@ -415,6 +515,14 @@ export default function AdminPanel({ user, token, logout }) {
                           data-testid="admin-search-input"
                         />
                       </div>
+                      <Button
+                        variant="outline"
+                        onClick={openImportDialog}
+                        data-testid="import-excel-btn"
+                      >
+                        <FileSpreadsheet size={18} className="mr-2" />
+                        Importa da Excel
+                      </Button>
                       <Button 
                         onClick={openNewInstrument}
                         className="bg-blue-600 hover:bg-blue-700 btn-animate"
@@ -816,6 +924,128 @@ export default function AdminPanel({ user, token, logout }) {
               >
                 {instrumentLoading ? "Salvataggio..." : "Salva"}
               </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* Excel Import Dialog */}
+        <Dialog open={showImportDialog} onOpenChange={setShowImportDialog}>
+          <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto" aria-describedby={undefined}>
+            <DialogHeader>
+              <DialogTitle style={{ fontFamily: 'Work Sans' }}>Importa strumenti da Excel</DialogTitle>
+              <DialogDescription>
+                Carica un file .xlsx, controlla l'anteprima e conferma: solo allora gli strumenti vengono aggiunti.
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="space-y-4">
+              <div className="flex flex-wrap gap-3">
+                <Button variant="outline" onClick={downloadImportTemplate} data-testid="download-template-btn">
+                  <Download size={16} className="mr-2" />
+                  Scarica modello Excel
+                </Button>
+                <label>
+                  <input
+                    type="file"
+                    accept=".xlsx"
+                    className="hidden"
+                    onChange={handleImportFile}
+                    data-testid="import-file-input"
+                  />
+                  <span className="inline-flex items-center justify-center h-10 px-4 rounded-md bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium cursor-pointer">
+                    <Upload size={16} className="mr-2" />
+                    Scegli file Excel
+                  </span>
+                </label>
+              </div>
+
+              {importFileName && (
+                <p className="text-sm text-slate-500">File: {importFileName}</p>
+              )}
+
+              {importLoading && (
+                <p className="text-sm text-slate-600">Elaborazione in corso...</p>
+              )}
+
+              {importError && (
+                <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm" data-testid="import-error">
+                  <AlertTriangle className="inline mr-2 h-4 w-4" />
+                  {importError}
+                </div>
+              )}
+
+              {importResult && (
+                <div className="p-3 rounded-lg bg-green-50 border border-green-200 text-green-700 text-sm" data-testid="import-success">
+                  <CheckCircle className="inline mr-2 h-4 w-4" />
+                  Importati {importResult.imported} strumenti
+                  {importResult.skipped > 0 ? ` (${importResult.skipped} saltati perché già presenti)` : ""}.
+                </div>
+              )}
+
+              {importPreview && (
+                <>
+                  <div className="flex flex-wrap gap-2 text-sm">
+                    <Badge className="bg-green-100 text-green-700 hover:bg-green-100">
+                      {importPreview.counts.new} nuovi
+                    </Badge>
+                    <Badge className="bg-amber-100 text-amber-700 hover:bg-amber-100">
+                      {importPreview.counts.duplicate} già presenti
+                    </Badge>
+                    <Badge className="bg-red-100 text-red-700 hover:bg-red-100">
+                      {importPreview.counts.error} con errori
+                    </Badge>
+                  </div>
+
+                  <div className="border rounded-lg max-h-72 overflow-auto">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Riga</TableHead>
+                          <TableHead>Codice</TableHead>
+                          <TableHead>Matricola</TableHead>
+                          <TableHead>Nome</TableHead>
+                          <TableHead>Scadenza</TableHead>
+                          <TableHead>Esito</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {importPreview.rows.map((r) => (
+                          <TableRow key={r.row} className={r.status === "new" ? "" : "bg-slate-50 text-slate-500"}>
+                            <TableCell>{r.row}</TableCell>
+                            <TableCell className="font-mono text-xs">{r.data.barcode || "-"}</TableCell>
+                            <TableCell className="font-mono text-xs">{r.data.matricola || "-"}</TableCell>
+                            <TableCell>{r.data.name || "-"}</TableCell>
+                            <TableCell>{r.data.calibration_expiry || "-"}</TableCell>
+                            <TableCell className="text-xs">
+                              {r.status === "new" ? (
+                                <span className="text-green-700">Nuovo</span>
+                              ) : (
+                                <span className={r.status === "error" ? "text-red-700" : "text-amber-700"}>{r.message}</span>
+                              )}
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                </>
+              )}
+            </div>
+
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setShowImportDialog(false)}>
+                {importResult ? "Chiudi" : "Annulla"}
+              </Button>
+              {importPreview && (
+                <Button
+                  onClick={confirmImport}
+                  disabled={importLoading || importPreview.counts.new === 0}
+                  className="bg-green-600 hover:bg-green-700"
+                  data-testid="confirm-import-btn"
+                >
+                  {importLoading ? "Importazione..." : `Conferma e importa ${importPreview.counts.new} strumenti`}
+                </Button>
+              )}
             </DialogFooter>
           </DialogContent>
         </Dialog>
