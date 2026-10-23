@@ -26,11 +26,8 @@ services:
     buildCommand: yarn install && yarn build
     staticPublishPath: ./build
     envVars:
-      - key: REACT_APP_BACKEND_URL
-        fromService:
-          type: web
-          name: metrology-lab-api
-          property: host
+       - key: REACT_APP_BACKEND_URL
+         value: https://metrology-lab-api.onrender.com
     routes:
       - type: rewrite
         source: /*
