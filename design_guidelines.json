@@ -1,0 +1,145 @@
+{
+  "project_name": "ISIS Malignani Metrology Lab Inventory",
+  "design_philosophy": {
+    "name": "Orca-Clean Metrology",
+    "core_principles": [
+      "Clinical Clarity: White space is a functional element, not empty space.",
+      "Data First: The inventory list is the hero. Scanning is the primary action.",
+      "Academic Precision: Typography and grids must feel like a lab report—structured and exact.",
+      "Visual Hierarchy: Use color only for status (Available/In Use) and primary actions."
+    ],
+    "mood": "Sterile, Professional, Efficient, Trustworthy"
+  },
+  "typography": {
+    "font_family": {
+      "headings": "Work Sans, sans-serif",
+      "body": "Inter, sans-serif",
+      "mono": "JetBrains Mono, monospace"
+    },
+    "scale": {
+      "h1": "text-4xl font-semibold tracking-tight lg:text-5xl",
+      "h2": "text-3xl font-medium tracking-tight",
+      "h3": "text-2xl font-medium",
+      "body_lg": "text-lg leading-relaxed",
+      "body_base": "text-base leading-relaxed text-slate-600",
+      "caption": "text-sm text-slate-500",
+      "label": "text-xs font-semibold uppercase tracking-wider text-slate-400"
+    }
+  },
+  "colors": {
+    "theme": "light",
+    "palette": {
+      "primary": {
+        "DEFAULT": "#0f172a",
+        "foreground": "#ffffff",
+        "description": "Deep Navy for primary actions and sidebar."
+      },
+      "secondary": {
+        "DEFAULT": "#f1f5f9",
+        "foreground": "#0f172a",
+        "description": "Slate-100 for secondary buttons and backgrounds."
+      },
+      "accent": {
+        "DEFAULT": "#0ea5e9",
+        "foreground": "#ffffff",
+        "description": "Sky Blue for active states and highlights."
+      },
+      "background": "#ffffff",
+      "surface": "#f8fafc",
+      "border": "#e2e8f0",
+      "status": {
+        "success": "#10b981",
+        "warning": "#f59e0b",
+        "error": "#ef4444",
+        "info": "#3b82f6"
+      }
+    }
+  },
+  "layout_strategies": {
+    "dashboard": {
+      "type": "sidebar-layout",
+      "structure": "Fixed sidebar (64px collapsed / 240px expanded) + Main Content Area",
+      "grid": "grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6",
+      "spacing": "p-6 md:p-8"
+    },
+    "inventory_list": {
+      "style": "Clean Data Table",
+      "features": ["Sticky Header", "Row Hover Actions", "Compact Mode"],
+      "density": "h-12 row height"
+    },
+    "detail_view": {
+      "type": "Split Panel",
+      "left": "Image & Quick Stats (30%)",
+      "right": "Detailed Metadata & History Timeline (70%)"
+    }
+  },
+  "components": {
+    "buttons": {
+      "primary": "rounded-md bg-primary text-primary-foreground hover:bg-primary/90 h-10 px-4 py-2 shadow-sm transition-all active:scale-95",
+      "secondary": "rounded-md bg-secondary text-secondary-foreground hover:bg-secondary/80 h-10 px-4 py-2",
+      "ghost": "rounded-md hover:bg-accent hover:text-accent-foreground h-10 px-4 py-2",
+      "scan_action": "rounded-full h-16 w-16 bg-blue-600 text-white shadow-lg hover:bg-blue-700 hover:shadow-xl fixed bottom-8 right-8 md:hidden flex items-center justify-center z-50"
+    },
+    "cards": {
+      "base": "rounded-xl border border-slate-200 bg-white shadow-sm hover:shadow-md transition-shadow duration-200",
+      "metric": "p-6 flex flex-col gap-2"
+    },
+    "inputs": {
+      "default": "flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+    },
+    "status_badge": {
+      "base": "inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2",
+      "variants": {
+        "available": "border-transparent bg-emerald-100 text-emerald-700 hover:bg-emerald-200",
+        "in_use": "border-transparent bg-amber-100 text-amber-700 hover:bg-amber-200",
+        "maintenance": "border-transparent bg-rose-100 text-rose-700 hover:bg-rose-200"
+      }
+    }
+  },
+  "assets": {
+    "images": [
+      {
+        "category": "branding",
+        "name": "school_logo",
+        "url": "https://customer-assets.emergentagent.com/job_lab-inventory-13/artifacts/qkvfmo8i_cropped-MALIGNANI_logo-ISIS-pittogramma.png",
+        "description": "Primary school logo for sidebar and login page"
+      },
+      {
+        "category": "branding",
+        "name": "school_building",
+        "url": "https://customer-assets.emergentagent.com/job_lab-inventory-13/artifacts/t62kynjy_Malignani5-optimized.webp",
+        "description": "Background image for login/landing page"
+      },
+      {
+        "category": "placeholder",
+        "name": "caliper_tool",
+        "url": "https://images.unsplash.com/photo-1568775991632-58cfd186d1a5?crop=entropy&cs=srgb&fm=jpg&q=85",
+        "description": "Example image for instrument detail view (Caliper)"
+      },
+      {
+        "category": "placeholder",
+        "name": "caliper_usage",
+        "url": "https://images.unsplash.com/photo-1758873263563-5ba4aa330799?crop=entropy&cs=srgb&fm=jpg&q=85",
+        "description": "Contextual usage image"
+      }
+    ]
+  },
+  "universal_guidelines": [
+    "White Space is King: Do not clutter. Use p-6 or p-8 for main containers.",
+    "Interaction Feedback: All buttons must have active:scale-95 and hover states.",
+    "Data Density: In tables, use compact rows (h-12) but readable fonts (text-sm).",
+    "Mobile First: The 'Scan' action must be accessible via a floating action button (FAB) on mobile.",
+    "No Gradients: Stick to solid colors and subtle border colors for a clean, flat look.",
+    "Empty States: Always provide a clear 'Add Item' or 'Scan First Item' illustration for empty states."
+  ],
+  "instructions_to_main_agent": [
+    "1. Setup 'Inter' and 'Work Sans' fonts via Google Fonts in index.html or CSS.",
+    "2. Customize tailwind.config.js to include the custom color palette (Slate scales).",
+    "3. Implement the SidebarLayout as the main wrapper for private routes.",
+    "4. Create the 'Login' page using the school building image as a side panel (split screen).",
+    "5. Build the 'InventoryTable' component using Shadcn Table, with search and filter inputs in the header.",
+    "6. Ensure the 'Scan' button is the most prominent element on the dashboard.",
+    "7. Use the 'status_badge' component for all item statuses.",
+    "8. For the 'History' timeline in detail view, use a vertical list with connected lines."
+  ]
+}

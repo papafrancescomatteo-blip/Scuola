@@ -1,0 +1,138 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Work+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+    margin: 0;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+h1, h2, h3, h4, h5, h6 {
+    font-family: 'Work Sans', sans-serif;
+}
+
+code, .mono {
+    font-family: 'JetBrains Mono', monospace;
+}
+
+@layer base {
+    :root {
+        --background: 0 0% 100%;
+        --foreground: 222 47% 11%;
+        --card: 0 0% 100%;
+        --card-foreground: 222 47% 11%;
+        --popover: 0 0% 100%;
+        --popover-foreground: 222 47% 11%;
+        --primary: 222 47% 11%;
+        --primary-foreground: 0 0% 100%;
+        --secondary: 210 40% 96%;
+        --secondary-foreground: 222 47% 11%;
+        --muted: 210 40% 96%;
+        --muted-foreground: 215 16% 47%;
+        --accent: 199 89% 48%;
+        --accent-foreground: 0 0% 100%;
+        --destructive: 0 84% 60%;
+        --destructive-foreground: 0 0% 100%;
+        --border: 214 32% 91%;
+        --input: 214 32% 91%;
+        --ring: 222 47% 11%;
+        --radius: 0.5rem;
+        --success: 160 84% 39%;
+        --warning: 38 92% 50%;
+    }
+}
+
+@layer base {
+    * {
+        @apply border-border;
+    }
+    body {
+        @apply bg-background text-foreground;
+    }
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: #f1f5f9;
+}
+
+::-webkit-scrollbar-thumb {
+    background: #cbd5e1;
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: #94a3b8;
+}
+
+/* Status badges */
+.status-available {
+    @apply bg-emerald-100 text-emerald-700 border-emerald-200;
+}
+
+.status-in_use {
+    @apply bg-amber-100 text-amber-700 border-amber-200;
+}
+
+.status-maintenance {
+    @apply bg-rose-100 text-rose-700 border-rose-200;
+}
+
+/* Button animations */
+.btn-animate {
+    @apply transition-all duration-150 active:scale-95;
+}
+
+/* Card hover effect */
+.card-hover {
+    @apply transition-shadow duration-200 hover:shadow-md;
+}
+
+/* Table row hover */
+.table-row-hover {
+    @apply transition-colors hover:bg-slate-50;
+}
+
+/* Sidebar */
+.sidebar-link {
+    @apply flex items-center gap-3 px-3 py-2 rounded-lg text-slate-600 hover:bg-slate-100 hover:text-slate-900 transition-colors;
+}
+
+.sidebar-link.active {
+    @apply bg-slate-100 text-slate-900 font-medium;
+}
+
+/* Float action button */
+.fab {
+    @apply fixed bottom-6 right-6 w-14 h-14 rounded-full bg-blue-600 text-white shadow-lg hover:bg-blue-700 hover:shadow-xl transition-all duration-200 flex items-center justify-center z-50;
+}
+
+/* Timeline */
+.timeline-line {
+    @apply absolute left-4 top-8 bottom-0 w-0.5 bg-slate-200;
+}
+
+.timeline-dot {
+    @apply absolute left-2.5 w-3 h-3 rounded-full border-2 border-white;
+}
+
+/* Empty state */
+.empty-state {
+    @apply flex flex-col items-center justify-center py-16 text-center;
+}
+
+/* Debug wrapper compatibility */
+@layer base {
+    [data-debug-wrapper="true"] {
+        display: contents !important;
+    }
+}
