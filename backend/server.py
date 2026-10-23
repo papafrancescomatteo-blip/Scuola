@@ -1,0 +1,652 @@
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Response, Request
+from fastapi.security import HTTPBearer
+from dotenv import load_dotenv
+from starlette.middleware.cors import CORSMiddleware
+from motor.motor_asyncio import AsyncIOMotorClient
+import os
+import logging
+from pathlib import Path
+from pydantic import BaseModel, Field, EmailStr
+from typing import List, Optional
+import uuid
+from datetime import datetime, timezone, timedelta
+import bcrypt
+import jwt
+import httpx
+
+ROOT_DIR = Path(__file__).parent
+load_dotenv(ROOT_DIR / '.env')
+
+# MongoDB connection
+mongo_url = os.environ['MONGO_URL']
+client = AsyncIOMotorClient(mongo_url)
+db = client[os.environ['DB_NAME']]
+
+# JWT Settings
+JWT_SECRET = os.environ['JWT_SECRET']
+JWT_ALGORITHM = 'HS256'
+JWT_EXPIRATION_HOURS = 24 * 7  # 7 days
+
+app = FastAPI(title="ISIS Malignani - Metrology Lab Inventory")
+api_router = APIRouter(prefix="/api")
+security = HTTPBearer(auto_error=False)
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# ============== MODELS ==============
+
+class UserCreate(BaseModel):
+    email: EmailStr
+    password: str
+    name: str
+
+class UserLogin(BaseModel):
+    email: EmailStr
+    password: str
+
+class UserResponse(BaseModel):
+    user_id: str
+    email: str
+    name: str
+    role: str
+    picture: Optional[str] = None
+    created_at: datetime
+
+class UserUpdate(BaseModel):
+    name: Optional[str] = None
+    role: Optional[str] = None
+
+class InstrumentCreate(BaseModel):
+    barcode: str
+    matricola: str  # Unique serial number for each instrument
+    name: str
+    description: Optional[str] = None
+    image_url: Optional[str] = None
+    location: Optional[str] = None
+    calibration_date: Optional[str] = None
+    calibration_expiry: Optional[str] = None
+    category: Optional[str] = None
+
+class InstrumentUpdate(BaseModel):
+    name: Optional[str] = None
+    matricola: Optional[str] = None
+    description: Optional[str] = None
+    image_url: Optional[str] = None
+    location: Optional[str] = None
+    calibration_date: Optional[str] = None
+    calibration_expiry: Optional[str] = None
+    category: Optional[str] = None
+    status: Optional[str] = None
+
+class InstrumentResponse(BaseModel):
+    instrument_id: str
+    barcode: str
+    matricola: str
+    name: str
+    description: Optional[str] = None
+    image_url: Optional[str] = None
+    status: str
+    location: Optional[str] = None
+    calibration_date: Optional[str] = None
+    calibration_expiry: Optional[str] = None
+    category: Optional[str] = None
+    current_holder: Optional[str] = None
+    current_destination: Optional[str] = None
+    created_at: datetime
+
+class MovementCreate(BaseModel):
+    instrument_id: str
+    movement_type: str  # "prelievo" or "deposito"
+    destination: Optional[str] = None
+    notes: Optional[str] = None
+
+class MovementResponse(BaseModel):
+    movement_id: str
+    instrument_id: str
+    instrument_name: Optional[str] = None
+    instrument_matricola: Optional[str] = None
+    user_id: str
+    user_name: Optional[str] = None
+    movement_type: str
+    destination: Optional[str] = None
+    notes: Optional[str] = None
+    timestamp: datetime
+
+# Destination models
+class DestinationCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+
+class DestinationResponse(BaseModel):
+    destination_id: str
+    name: str
+    description: Optional[str] = None
+    created_at: datetime
+
+# ============== HELPER FUNCTIONS ==============
+
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+def verify_password(password: str, hashed: str) -> bool:
+    return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
+
+def create_jwt_token(user_id: str, email: str, role: str) -> str:
+    payload = {
+        'user_id': user_id,
+        'email': email,
+        'role': role,
+        'exp': datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRATION_HOURS)
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+def decode_jwt_token(token: str) -> dict:
+    try:
+        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+async def get_current_user(request: Request, credentials = Depends(security)) -> dict:
+    # First try cookie
+    session_token = request.cookies.get('session_token')
+    if session_token:
+        session = await db.user_sessions.find_one({"session_token": session_token}, {"_id": 0})
+        if session:
+            expires_at = session.get("expires_at")
+            if isinstance(expires_at, str):
+                expires_at = datetime.fromisoformat(expires_at)
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if expires_at > datetime.now(timezone.utc):
+                user = await db.users.find_one({"user_id": session["user_id"]}, {"_id": 0})
+                if user:
+                    return user
+    
+    # Then try Authorization header (JWT)
+    if credentials and credentials.credentials:
+        token = credentials.credentials
+        try:
+            payload = decode_jwt_token(token)
+            user = await db.users.find_one({"user_id": payload["user_id"]}, {"_id": 0})
+            if user:
+                return user
+        except:
+            pass
+    
+    raise HTTPException(status_code=401, detail="Not authenticated")
+
+async def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return current_user
+
+async def require_admin_or_technician(current_user: dict = Depends(get_current_user)) -> dict:
+    if current_user.get("role") not in ["admin", "technician"]:
+        raise HTTPException(status_code=403, detail="Admin or Technician access required")
+    return current_user
+
+# ============== AUTH ENDPOINTS ==============
+
+@api_router.post("/auth/register")
+async def register(user_data: UserCreate):
+    existing = await db.users.find_one({"email": user_data.email}, {"_id": 0})
+    if existing:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    
+    user_id = f"user_{uuid.uuid4().hex[:12]}"
+    user_count = await db.users.count_documents({})
+    
+    user_doc = {
+        "user_id": user_id,
+        "email": user_data.email,
+        "name": user_data.name,
+        "password_hash": hash_password(user_data.password),
+        "role": "admin" if user_count == 0 else "operator",
+        "picture": None,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    
+    await db.users.insert_one(user_doc)
+    del user_doc["password_hash"]
+    user_doc.pop("_id", None)
+    
+    token = create_jwt_token(user_id, user_data.email, user_doc["role"])
+    
+    return {"user": user_doc, "token": token}
+
+@api_router.post("/auth/login")
+async def login(user_data: UserLogin, response: Response):
+    user = await db.users.find_one({"email": user_data.email}, {"_id": 0})
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    if not verify_password(user_data.password, user.get("password_hash", "")):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    token = create_jwt_token(user["user_id"], user["email"], user["role"])
+    
+    user_response = {k: v for k, v in user.items() if k != "password_hash"}
+    
+    return {"user": user_response, "token": token}
+
+@api_router.post("/auth/google-session")
+async def google_session(request: Request, response: Response):
+    body = await request.json()
+    session_id = body.get("session_id")
+    
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id required")
+    
+    async with httpx.AsyncClient() as client:
+        auth_response = await client.get(
+            "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
+            headers={"X-Session-ID": session_id}
+        )
+        
+        if auth_response.status_code != 200:
+            raise HTTPException(status_code=401, detail="Invalid session")
+        
+        auth_data = auth_response.json()
+    
+    email = auth_data.get("email")
+    user = await db.users.find_one({"email": email}, {"_id": 0})
+    
+    if not user:
+        user_count = await db.users.count_documents({})
+        user_id = f"user_{uuid.uuid4().hex[:12]}"
+        user = {
+            "user_id": user_id,
+            "email": email,
+            "name": auth_data.get("name", email.split("@")[0]),
+            "role": "admin" if user_count == 0 else "operator",
+            "picture": auth_data.get("picture"),
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        await db.users.insert_one(user)
+        user.pop("_id", None)
+    
+    session_token = auth_data.get("session_token", f"session_{uuid.uuid4().hex}")
+    expires_at = datetime.now(timezone.utc) + timedelta(days=7)
+    
+    await db.user_sessions.delete_many({"user_id": user["user_id"]})
+    await db.user_sessions.insert_one({
+        "session_token": session_token,
+        "user_id": user["user_id"],
+        "expires_at": expires_at.isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat()
+    })
+    
+    response.set_cookie(
+        key="session_token",
+        value=session_token,
+        httponly=True,
+        secure=True,
+        samesite="none",
+        path="/",
+        max_age=7 * 24 * 60 * 60
+    )
+    
+    return {"user": user}
+
+@api_router.get("/auth/me")
+async def get_me(current_user: dict = Depends(get_current_user)):
+    user_response = {k: v for k, v in current_user.items() if k != "password_hash"}
+    return user_response
+
+@api_router.post("/auth/logout")
+async def logout(request: Request, response: Response):
+    session_token = request.cookies.get("session_token")
+    if session_token:
+        await db.user_sessions.delete_many({"session_token": session_token})
+    
+    response.delete_cookie(key="session_token", path="/")
+    return {"message": "Logged out successfully"}
+
+# ============== DESTINATIONS ENDPOINTS (Admin manages pickup locations) ==============
+
+@api_router.get("/destinations", response_model=List[DestinationResponse])
+async def get_destinations(current_user: dict = Depends(get_current_user)):
+    destinations = await db.destinations.find({}, {"_id": 0}).to_list(1000)
+    for dest in destinations:
+        if isinstance(dest.get("created_at"), str):
+            dest["created_at"] = datetime.fromisoformat(dest["created_at"])
+    return destinations
+
+@api_router.post("/destinations")
+async def create_destination(data: DestinationCreate, current_user: dict = Depends(require_admin)):
+    existing = await db.destinations.find_one({"name": data.name}, {"_id": 0})
+    if existing:
+        raise HTTPException(status_code=400, detail="Destination already exists")
+    
+    destination_id = f"dest_{uuid.uuid4().hex[:12]}"
+    destination = {
+        "destination_id": destination_id,
+        "name": data.name,
+        "description": data.description,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    
+    await db.destinations.insert_one(destination)
+    destination.pop("_id", None)
+    
+    return destination
+
+@api_router.put("/destinations/{destination_id}")
+async def update_destination(destination_id: str, data: DestinationCreate, current_user: dict = Depends(require_admin)):
+    destination = await db.destinations.find_one({"destination_id": destination_id}, {"_id": 0})
+    if not destination:
+        raise HTTPException(status_code=404, detail="Destination not found")
+    
+    await db.destinations.update_one(
+        {"destination_id": destination_id},
+        {"$set": {"name": data.name, "description": data.description}}
+    )
+    
+    updated = await db.destinations.find_one({"destination_id": destination_id}, {"_id": 0})
+    return updated
+
+@api_router.delete("/destinations/{destination_id}")
+async def delete_destination(destination_id: str, current_user: dict = Depends(require_admin)):
+    result = await db.destinations.delete_one({"destination_id": destination_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Destination not found")
+    return {"message": "Destination deleted successfully"}
+
+# ============== INSTRUMENTS ENDPOINTS ==============
+
+@api_router.get("/instruments", response_model=List[InstrumentResponse])
+async def get_instruments(
+    search: Optional[str] = None,
+    status: Optional[str] = None,
+    category: Optional[str] = None,
+    current_user: dict = Depends(get_current_user)
+):
+    query = {}
+    if search:
+        query["$or"] = [
+            {"barcode": {"$regex": search, "$options": "i"}},
+            {"matricola": {"$regex": search, "$options": "i"}},
+            {"name": {"$regex": search, "$options": "i"}},
+            {"description": {"$regex": search, "$options": "i"}}
+        ]
+    if status:
+        query["status"] = status
+    if category:
+        query["category"] = category
+    
+    instruments = await db.instruments.find(query, {"_id": 0}).to_list(1000)
+    
+    for inst in instruments:
+        if isinstance(inst.get("created_at"), str):
+            inst["created_at"] = datetime.fromisoformat(inst["created_at"])
+        # Ensure matricola field exists for older records
+        if "matricola" not in inst:
+            inst["matricola"] = inst.get("barcode", "N/A")
+    
+    return instruments
+
+@api_router.get("/instruments/barcode/{barcode}")
+async def get_instruments_by_barcode(barcode: str, current_user: dict = Depends(get_current_user)):
+    """Get ALL instruments with this barcode (multiple units with same barcode, different matricola)"""
+    instruments = await db.instruments.find({"barcode": barcode}, {"_id": 0}).to_list(1000)
+    
+    if not instruments:
+        raise HTTPException(status_code=404, detail="No instruments found with this barcode")
+    
+    for inst in instruments:
+        if isinstance(inst.get("created_at"), str):
+            inst["created_at"] = datetime.fromisoformat(inst["created_at"])
+        if "matricola" not in inst:
+            inst["matricola"] = inst.get("barcode", "N/A")
+    
+    return instruments
+
+@api_router.get("/instruments/{instrument_id}")
+async def get_instrument(instrument_id: str, current_user: dict = Depends(get_current_user)):
+    instrument = await db.instruments.find_one({"instrument_id": instrument_id}, {"_id": 0})
+    if not instrument:
+        raise HTTPException(status_code=404, detail="Instrument not found")
+    
+    if isinstance(instrument.get("created_at"), str):
+        instrument["created_at"] = datetime.fromisoformat(instrument["created_at"])
+    if "matricola" not in instrument:
+        instrument["matricola"] = instrument.get("barcode", "N/A")
+    
+    return instrument
+
+@api_router.post("/instruments")
+async def create_instrument(data: InstrumentCreate, current_user: dict = Depends(require_admin_or_technician)):
+    # Check if matricola is unique (matricola must be unique, barcode can be shared)
+    existing = await db.instruments.find_one({"matricola": data.matricola}, {"_id": 0})
+    if existing:
+        raise HTTPException(status_code=400, detail="Matricola already exists")
+    
+    instrument_id = f"inst_{uuid.uuid4().hex[:12]}"
+    instrument = {
+        "instrument_id": instrument_id,
+        "barcode": data.barcode,
+        "matricola": data.matricola,
+        "name": data.name,
+        "description": data.description,
+        "image_url": data.image_url,
+        "status": "available",
+        "location": data.location,
+        "calibration_date": data.calibration_date,
+        "calibration_expiry": data.calibration_expiry,
+        "category": data.category,
+        "current_holder": None,
+        "current_destination": None,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    
+    await db.instruments.insert_one(instrument)
+    instrument.pop("_id", None)
+    
+    return instrument
+
+@api_router.put("/instruments/{instrument_id}")
+async def update_instrument(instrument_id: str, data: InstrumentUpdate, current_user: dict = Depends(require_admin_or_technician)):
+    instrument = await db.instruments.find_one({"instrument_id": instrument_id}, {"_id": 0})
+    if not instrument:
+        raise HTTPException(status_code=404, detail="Instrument not found")
+    
+    update_data = {k: v for k, v in data.model_dump().items() if v is not None}
+    
+    # Check matricola uniqueness if being updated
+    if "matricola" in update_data:
+        existing = await db.instruments.find_one({
+            "matricola": update_data["matricola"],
+            "instrument_id": {"$ne": instrument_id}
+        }, {"_id": 0})
+        if existing:
+            raise HTTPException(status_code=400, detail="Matricola already exists")
+    
+    if update_data:
+        await db.instruments.update_one({"instrument_id": instrument_id}, {"$set": update_data})
+    
+    updated = await db.instruments.find_one({"instrument_id": instrument_id}, {"_id": 0})
+    return updated
+
+@api_router.delete("/instruments/{instrument_id}")
+async def delete_instrument(instrument_id: str, current_user: dict = Depends(require_admin_or_technician)):
+    result = await db.instruments.delete_one({"instrument_id": instrument_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Instrument not found")
+    
+    await db.movements.delete_many({"instrument_id": instrument_id})
+    
+    return {"message": "Instrument deleted successfully"}
+
+# ============== MOVEMENTS ENDPOINTS ==============
+
+@api_router.post("/movements")
+async def create_movement(data: MovementCreate, current_user: dict = Depends(get_current_user)):
+    instrument = await db.instruments.find_one({"instrument_id": data.instrument_id}, {"_id": 0})
+    if not instrument:
+        raise HTTPException(status_code=404, detail="Instrument not found")
+    
+    if data.movement_type == "prelievo":
+        if instrument.get("status") == "in_use":
+            raise HTTPException(status_code=400, detail="Instrument is already in use")
+        if not data.destination:
+            raise HTTPException(status_code=400, detail="Destination is required for prelievo")
+        update_data = {
+            "status": "in_use",
+            "current_holder": current_user["user_id"],
+            "current_destination": data.destination
+        }
+    elif data.movement_type == "deposito":
+        if instrument.get("status") == "available":
+            raise HTTPException(status_code=400, detail="Instrument is already available")
+        update_data = {
+            "status": "available",
+            "current_holder": None,
+            "current_destination": None
+        }
+    else:
+        raise HTTPException(status_code=400, detail="Invalid movement type")
+    
+    await db.instruments.update_one({"instrument_id": data.instrument_id}, {"$set": update_data})
+    
+    movement_id = f"mov_{uuid.uuid4().hex[:12]}"
+    movement = {
+        "movement_id": movement_id,
+        "instrument_id": data.instrument_id,
+        "instrument_name": instrument.get("name"),
+        "instrument_matricola": instrument.get("matricola", instrument.get("barcode")),
+        "user_id": current_user["user_id"],
+        "user_name": current_user.get("name"),
+        "movement_type": data.movement_type,
+        "destination": data.destination,
+        "notes": data.notes,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+    
+    await db.movements.insert_one(movement)
+    movement.pop("_id", None)
+    
+    return movement
+
+@api_router.get("/movements", response_model=List[MovementResponse])
+async def get_movements(
+    instrument_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    limit: int = 100,
+    current_user: dict = Depends(get_current_user)
+):
+    query = {}
+    if instrument_id:
+        query["instrument_id"] = instrument_id
+    if user_id:
+        query["user_id"] = user_id
+    
+    movements = await db.movements.find(query, {"_id": 0}).sort("timestamp", -1).to_list(limit)
+    
+    for mov in movements:
+        if isinstance(mov.get("timestamp"), str):
+            mov["timestamp"] = datetime.fromisoformat(mov["timestamp"])
+        if "instrument_matricola" not in mov:
+            mov["instrument_matricola"] = None
+    
+    return movements
+
+@api_router.get("/movements/instrument/{instrument_id}", response_model=List[MovementResponse])
+async def get_instrument_movements(instrument_id: str, current_user: dict = Depends(get_current_user)):
+    movements = await db.movements.find({"instrument_id": instrument_id}, {"_id": 0}).sort("timestamp", -1).to_list(100)
+    
+    for mov in movements:
+        if isinstance(mov.get("timestamp"), str):
+            mov["timestamp"] = datetime.fromisoformat(mov["timestamp"])
+        if "instrument_matricola" not in mov:
+            mov["instrument_matricola"] = None
+    
+    return movements
+
+# ============== USERS MANAGEMENT (ADMIN) ==============
+
+@api_router.get("/users", response_model=List[UserResponse])
+async def get_users(current_user: dict = Depends(require_admin)):
+    users = await db.users.find({}, {"_id": 0, "password_hash": 0}).to_list(1000)
+    
+    for user in users:
+        if isinstance(user.get("created_at"), str):
+            user["created_at"] = datetime.fromisoformat(user["created_at"])
+    
+    return users
+
+@api_router.put("/users/{user_id}")
+async def update_user(user_id: str, data: UserUpdate, current_user: dict = Depends(require_admin)):
+    user = await db.users.find_one({"user_id": user_id}, {"_id": 0})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    update_data = {k: v for k, v in data.model_dump().items() if v is not None}
+    
+    if update_data:
+        await db.users.update_one({"user_id": user_id}, {"$set": update_data})
+    
+    updated = await db.users.find_one({"user_id": user_id}, {"_id": 0, "password_hash": 0})
+    return updated
+
+@api_router.delete("/users/{user_id}")
+async def delete_user(user_id: str, current_user: dict = Depends(require_admin)):
+    if user_id == current_user["user_id"]:
+        raise HTTPException(status_code=400, detail="Cannot delete yourself")
+    
+    result = await db.users.delete_one({"user_id": user_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    await db.user_sessions.delete_many({"user_id": user_id})
+    
+    return {"message": "User deleted successfully"}
+
+# ============== STATS ENDPOINT ==============
+
+@api_router.get("/stats")
+async def get_stats(current_user: dict = Depends(get_current_user)):
+    total_instruments = await db.instruments.count_documents({})
+    available = await db.instruments.count_documents({"status": "available"})
+    in_use = await db.instruments.count_documents({"status": "in_use"})
+    total_users = await db.users.count_documents({})
+    total_movements = await db.movements.count_documents({})
+    
+    return {
+        "total_instruments": total_instruments,
+        "available": available,
+        "in_use": in_use,
+        "total_users": total_users,
+        "total_movements": total_movements
+    }
+
+# ============== CATEGORIES ENDPOINT ==============
+
+@api_router.get("/categories")
+async def get_categories(current_user: dict = Depends(get_current_user)):
+    categories = await db.instruments.distinct("category")
+    return [c for c in categories if c]
+
+# Root endpoint
+@api_router.get("/")
+async def root():
+    return {"message": "ISIS Malignani - Metrology Lab Inventory API"}
+
+# Include router
+app.include_router(api_router)
+
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_credentials=True,
+    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.on_event("shutdown")
+async def shutdown_db_client():
+    client.close()
