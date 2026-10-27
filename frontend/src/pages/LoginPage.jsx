@@ -1,10 +1,10 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Link } from "react-router-dom";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
-import { Eye, EyeOff, LogIn } from "lucide-react";
+import { Eye, EyeOff, LogIn, CreditCard } from "lucide-react";
 import { API } from "../App";
 
 const SCHOOL_LOGO = "https://customer-assets.emergentagent.com/job_lab-inventory-13/artifacts/qkvfmo8i_cropped-MALIGNANI_logo-ISIS-pittogramma.png";
@@ -16,6 +16,66 @@ export default function LoginPage({ login }) {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+
+  const [badgeMessage, setBadgeMessage] = useState("");
+  const loginRef = useRef(login);
+  useEffect(() => {
+    loginRef.current = login;
+  });
+
+  // Lettore di tessere: funziona come una tastiera che "digita" il codice molto in fretta e preme Invio.
+  // Una persona non riesce a scrivere 4+ caratteri con meno di 60 ms tra un tasto e l'altro.
+  useEffect(() => {
+    let buffer = "";
+    let last = 0;
+
+    const submitBadge = async (code) => {
+      setError("");
+      setBadgeMessage("Lettura tessera in corso...");
+      setEmail("");
+      setPassword("");
+      try {
+        const response = await fetch(`${API}/auth/badge-login`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ badge: code }),
+          credentials: "include"
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(typeof data.detail === "string" ? data.detail : "Tessera non riconosciuta");
+        }
+        loginRef.current(data.user, data.token);
+      } catch (err) {
+        setBadgeMessage("");
+        setError(err.message || "Errore di connessione");
+      }
+    };
+
+    const onKeyDown = (e) => {
+      if (e.ctrlKey || e.altKey || e.metaKey) return;
+      const now = Date.now();
+      if (e.key === "Enter") {
+        if (buffer.length >= 4 && now - last <= 60) {
+          e.preventDefault();
+          e.stopPropagation();
+          const code = buffer;
+          buffer = "";
+          submitBadge(code);
+          return;
+        }
+        buffer = "";
+        return;
+      }
+      if (e.key.length !== 1) return;
+      if (now - last > 60) buffer = "";
+      buffer += e.key;
+      last = now;
+    };
+
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, []);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -90,6 +150,14 @@ export default function LoginPage({ login }) {
             </CardHeader>
 
             <CardContent className="px-0">
+              <div
+                className="flex items-center gap-3 p-3 mb-4 rounded-lg bg-slate-50 border border-slate-200 text-sm text-slate-600"
+                data-testid="badge-hint"
+              >
+                <CreditCard size={20} className="text-blue-600 shrink-0" />
+                <span>{badgeMessage || "Hai una tessera? Avvicinala al lettore per accedere."}</span>
+              </div>
+
               <form onSubmit={handleSubmit} className="space-y-4">
                 {error && (
                   <div 
