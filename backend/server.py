@@ -14,6 +14,10 @@ import bcrypt
 import jwt
 import httpx
 import io
+import re
+import hmac
+import hashlib
+import asyncio
 from datetime import date as date_type
 
 ROOT_DIR = Path(__file__).parent
@@ -54,7 +58,11 @@ class UserResponse(BaseModel):
     name: str
     role: str
     picture: Optional[str] = None
+    has_badge: bool = False
     created_at: datetime
+
+class BadgeData(BaseModel):
+    badge: str
 
 class UserUpdate(BaseModel):
     name: Optional[str] = None
@@ -134,6 +142,17 @@ def hash_password(password: str) -> str:
 
 def verify_password(password: str, hashed: str) -> bool:
     return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
+
+def normalize_badge(raw: str) -> str:
+    """Pulisce il codice letto dal lettore: solo lettere e numeri, maiuscole."""
+    return re.sub(r"[^A-Za-z0-9]", "", raw or "").upper()
+
+def hash_badge(raw: str) -> str:
+    """Il codice della tessera non viene salvato in chiaro: si salva solo un hash con chiave segreta."""
+    return hmac.new(JWT_SECRET.encode("utf-8"), normalize_badge(raw).encode("utf-8"), hashlib.sha256).hexdigest()
+
+def public_user(user: dict) -> dict:
+    return {k: v for k, v in user.items() if k not in ("password_hash", "badge_hash")} | {"has_badge": bool(user.get("badge_hash"))}
 
 def create_jwt_token(user_id: str, email: str, role: str) -> str:
     payload = {
@@ -231,9 +250,19 @@ async def login(user_data: UserLogin, response: Response):
     
     token = create_jwt_token(user["user_id"], user["email"], user["role"])
     
-    user_response = {k: v for k, v in user.items() if k != "password_hash"}
+    user_response = public_user(user)
     
     return {"user": user_response, "token": token}
+
+@api_router.post("/auth/badge-login")
+async def badge_login(data: BadgeData):
+    code = normalize_badge(data.badge)
+    user = await db.users.find_one({"badge_hash": hash_badge(code)}, {"_id": 0}) if len(code) >= 4 else None
+    if not user:
+        await asyncio.sleep(0.7)  # rallenta i tentativi a caso
+        raise HTTPException(status_code=401, detail="Tessera non riconosciuta")
+    token = create_jwt_token(user["user_id"], user["email"], user["role"])
+    return {"user": public_user(user), "token": token}
 
 @api_router.post("/auth/google-session")
 async def google_session(request: Request, response: Response):
@@ -296,8 +325,7 @@ async def google_session(request: Request, response: Response):
 
 @api_router.get("/auth/me")
 async def get_me(current_user: dict = Depends(get_current_user)):
-    user_response = {k: v for k, v in current_user.items() if k != "password_hash"}
-    return user_response
+    return public_user(current_user)
 
 @api_router.post("/auth/logout")
 async def logout(request: Request, response: Response):
@@ -760,6 +788,7 @@ async def get_users(current_user: dict = Depends(require_admin)):
     users = await db.users.find({}, {"_id": 0, "password_hash": 0}).to_list(1000)
     
     for user in users:
+        user["has_badge"] = bool(user.pop("badge_hash", None))
         if isinstance(user.get("created_at"), str):
             user["created_at"] = datetime.fromisoformat(user["created_at"])
     
@@ -776,8 +805,30 @@ async def update_user(user_id: str, data: UserUpdate, current_user: dict = Depen
     if update_data:
         await db.users.update_one({"user_id": user_id}, {"$set": update_data})
     
-    updated = await db.users.find_one({"user_id": user_id}, {"_id": 0, "password_hash": 0})
+    updated = await db.users.find_one({"user_id": user_id}, {"_id": 0, "password_hash": 0, "badge_hash": 0})
     return updated
+
+@api_router.put("/users/{user_id}/badge")
+async def set_user_badge(user_id: str, data: BadgeData, current_user: dict = Depends(require_admin)):
+    user = await db.users.find_one({"user_id": user_id}, {"_id": 0})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    code = normalize_badge(data.badge)
+    if len(code) < 4:
+        raise HTTPException(status_code=400, detail="Codice tessera non valido o troppo corto")
+    badge_hash = hash_badge(code)
+    other = await db.users.find_one({"badge_hash": badge_hash, "user_id": {"$ne": user_id}}, {"_id": 0})
+    if other:
+        raise HTTPException(status_code=400, detail=f"Tessera già assegnata a {other.get('name', 'un altro utente')}")
+    await db.users.update_one({"user_id": user_id}, {"$set": {"badge_hash": badge_hash}})
+    return {"message": "Tessera assegnata", "has_badge": True}
+
+@api_router.delete("/users/{user_id}/badge")
+async def remove_user_badge(user_id: str, current_user: dict = Depends(require_admin)):
+    result = await db.users.update_one({"user_id": user_id}, {"$unset": {"badge_hash": ""}})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"message": "Tessera rimossa", "has_badge": False}
 
 @api_router.delete("/users/{user_id}")
 async def delete_user(user_id: str, current_user: dict = Depends(require_admin)):
