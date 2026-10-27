@@ -51,7 +51,8 @@ import {
   Download,
   Upload,
   CheckCircle,
-  AlertTriangle
+  AlertTriangle,
+  CreditCard
 } from "lucide-react";
 import { API } from "../App";
 
@@ -79,6 +80,13 @@ export default function AdminPanel({ user, token, logout }) {
   });
   const [instrumentLoading, setInstrumentLoading] = useState(false);
   
+  // Badge Dialog State
+  const [badgeUser, setBadgeUser] = useState(null);
+  const [badgeCode, setBadgeCode] = useState("");
+  const [badgeLoading, setBadgeLoading] = useState(false);
+  const [badgeError, setBadgeError] = useState("");
+  const [badgeDone, setBadgeDone] = useState("");
+
   // Excel Import State
   const [showImportDialog, setShowImportDialog] = useState(false);
   const [importPreview, setImportPreview] = useState(null);
@@ -138,6 +146,67 @@ export default function AdminPanel({ user, token, logout }) {
   useEffect(() => {
     fetchData();
   }, [token]);
+
+  // Tessere (badge)
+  const openBadgeDialog = (userItem) => {
+    setBadgeUser(userItem);
+    setBadgeCode("");
+    setBadgeError("");
+    setBadgeDone("");
+  };
+
+  const saveBadge = async () => {
+    if (!badgeUser || badgeCode.trim().length < 4) return;
+    setBadgeLoading(true);
+    setBadgeError("");
+    setBadgeDone("");
+    try {
+      const response = await fetch(`${API}/users/${badgeUser.user_id}/badge`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        credentials: "include",
+        body: JSON.stringify({ badge: badgeCode })
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        setBadgeError(typeof data.detail === "string" ? data.detail : "Impossibile salvare la tessera");
+      } else {
+        setBadgeDone("Tessera assegnata a " + badgeUser.name);
+        setBadgeUser({ ...badgeUser, has_badge: true });
+        fetchData();
+      }
+    } catch (err) {
+      setBadgeError("Errore di connessione. Riprova.");
+    } finally {
+      setBadgeCode("");
+      setBadgeLoading(false);
+    }
+  };
+
+  const removeBadge = async () => {
+    if (!badgeUser) return;
+    setBadgeLoading(true);
+    setBadgeError("");
+    setBadgeDone("");
+    try {
+      const response = await fetch(`${API}/users/${badgeUser.user_id}/badge`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+        credentials: "include"
+      });
+      if (response.ok) {
+        setBadgeDone("Tessera rimossa");
+        setBadgeUser({ ...badgeUser, has_badge: false });
+        fetchData();
+      } else {
+        setBadgeError("Impossibile rimuovere la tessera");
+      }
+    } catch (err) {
+      setBadgeError("Errore di connessione. Riprova.");
+    } finally {
+      setBadgeLoading(false);
+    }
+  };
 
   // Excel Import
   const openImportDialog = () => {
@@ -732,6 +801,7 @@ export default function AdminPanel({ user, token, logout }) {
                             <TableHead>Nome</TableHead>
                             <TableHead>Email</TableHead>
                             <TableHead>Ruolo</TableHead>
+                            <TableHead>Tessera</TableHead>
                             <TableHead className="text-right">Azioni</TableHead>
                           </TableRow>
                         </TableHeader>
@@ -760,8 +830,24 @@ export default function AdminPanel({ user, token, logout }) {
                               <TableCell>
                                 {getRoleBadge(userItem.role)}
                               </TableCell>
+                              <TableCell>
+                                {userItem.has_badge ? (
+                                  <Badge className="bg-green-100 text-green-700 hover:bg-green-100">Assegnata</Badge>
+                                ) : (
+                                  <span className="text-slate-400 text-sm">Nessuna</span>
+                                )}
+                              </TableCell>
                               <TableCell className="text-right">
                                 <div className="flex justify-end gap-2">
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => openBadgeDialog(userItem)}
+                                    title="Assegna tessera"
+                                    data-testid={`badge-user-${userItem.user_id}`}
+                                  >
+                                    <CreditCard size={16} />
+                                  </Button>
                                   <Button 
                                     variant="ghost" 
                                     size="sm"
@@ -923,6 +1009,80 @@ export default function AdminPanel({ user, token, logout }) {
                 data-testid="save-instrument-btn"
               >
                 {instrumentLoading ? "Salvataggio..." : "Salva"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* Badge Dialog */}
+        <Dialog open={!!badgeUser} onOpenChange={(open) => { if (!open) setBadgeUser(null); }}>
+          <DialogContent aria-describedby={undefined}>
+            <DialogHeader>
+              <DialogTitle style={{ fontFamily: 'Work Sans' }}>
+                Tessera di {badgeUser ? badgeUser.name : ""}
+              </DialogTitle>
+              <DialogDescription>
+                Clicca nel campo e passa la tessera sul lettore: il codice viene letto e salvato da solo.
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="space-y-4">
+              {badgeUser && (
+                <p className="text-sm text-slate-600">
+                  Stato attuale:{" "}
+                  <strong>{badgeUser.has_badge ? "tessera assegnata" : "nessuna tessera"}</strong>
+                  {badgeUser.has_badge && " (passandone una nuova, sostituisce la precedente)"}
+                </p>
+              )}
+
+              <div className="flex gap-2">
+                <Input
+                  autoFocus
+                  placeholder="Passa la tessera sul lettore..."
+                  value={badgeCode}
+                  onChange={(e) => setBadgeCode(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      saveBadge();
+                    }
+                  }}
+                  disabled={badgeLoading}
+                  className="font-mono"
+                  data-testid="badge-input"
+                />
+                <Button onClick={saveBadge} disabled={badgeLoading || badgeCode.trim().length < 4}>
+                  Salva
+                </Button>
+              </div>
+
+              {badgeError && (
+                <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">
+                  <AlertTriangle className="inline mr-2 h-4 w-4" />
+                  {badgeError}
+                </div>
+              )}
+              {badgeDone && (
+                <div className="p-3 rounded-lg bg-green-50 border border-green-200 text-green-700 text-sm">
+                  <CheckCircle className="inline mr-2 h-4 w-4" />
+                  {badgeDone}
+                </div>
+              )}
+            </div>
+
+            <DialogFooter>
+              {badgeUser && badgeUser.has_badge && (
+                <Button
+                  variant="outline"
+                  className="text-red-600 border-red-200 hover:bg-red-50"
+                  onClick={removeBadge}
+                  disabled={badgeLoading}
+                >
+                  Rimuovi tessera
+                </Button>
+              )}
+              <Button variant="outline" onClick={() => setBadgeUser(null)}>
+                Chiudi
               </Button>
             </DialogFooter>
           </DialogContent>
