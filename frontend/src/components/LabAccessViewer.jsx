@@ -1,10 +1,10 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Badge } from "./ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
-import { ClipboardCheck, Download, Search, RefreshCw, Trash2 } from "lucide-react";
+import { ClipboardCheck, Download, Search, RefreshCw, Trash2, FileText } from "lucide-react";
 import { API } from "../App";
 
 const PAGE = 100;
@@ -60,6 +60,51 @@ export default function LabAccessViewer({ token, canDelete }) {
     // eslint-disable-next-line
   }, [token, applied]);
 
+  // Aggiorna da solo ogni 30 secondi, così le nuove firme compaiono subito
+  const loadRef = useRef(load);
+  useEffect(() => {
+    loadRef.current = load;
+  });
+  useEffect(() => {
+    const timer = setInterval(() => loadRef.current(true), 30000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const isoDay = (d) => d.toLocaleDateString("sv-SE", { timeZone: "Europe/Rome" });
+  const applyRange = (kind) => {
+    const today = new Date();
+    let from = isoDay(today);
+    if (kind === "week") {
+      const d = new Date(today);
+      const dow = (d.getDay() + 6) % 7; // lunedì = 0
+      d.setDate(d.getDate() - dow);
+      from = isoDay(d);
+    } else if (kind === "month") {
+      const d = new Date(today.getFullYear(), today.getMonth(), 1);
+      from = isoDay(d);
+    }
+    const to = isoDay(today);
+    setDateFrom(from);
+    setDateTo(to);
+    setApplied({ search: search.trim(), dateFrom: from, dateTo: to });
+  };
+
+  const downloadWord = async () => {
+    try {
+      const res = await fetch(`${API}/lab/access/export-docx?${params().toString()}`, { headers, credentials: "include" });
+      if (!res.ok) throw new Error("export");
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "registro_accessi_laboratorio.docx";
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError("Impossibile scaricare il registro in Word.");
+    }
+  };
+
   const exportExcel = async () => {
     try {
       const res = await fetch(`${API}/lab/access/export?${params().toString()}`, { headers, credentials: "include" });
@@ -96,13 +141,19 @@ export default function LabAccessViewer({ token, canDelete }) {
               Registro accessi al laboratorio
             </CardTitle>
             <CardDescription>
-              Ingressi e uscite firmati da chi entra in laboratorio. L'Excel ha le stesse colonne del registro cartaceo.
+              Ingressi e uscite firmati da chi entra in laboratorio. Il Word scaricato è il modulo del registro, già compilato.
             </CardDescription>
           </div>
-          <Button variant="outline" onClick={exportExcel} data-testid="export-access-btn">
-            <Download size={16} className="mr-2" />
-            Esporta Excel
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button onClick={downloadWord} className="bg-blue-600 hover:bg-blue-700" data-testid="export-word-btn">
+              <FileText size={16} className="mr-2" />
+              Scarica Word
+            </Button>
+            <Button variant="outline" onClick={exportExcel} data-testid="export-access-btn">
+              <Download size={16} className="mr-2" />
+              Excel
+            </Button>
+          </div>
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -129,6 +180,11 @@ export default function LabAccessViewer({ token, canDelete }) {
             <Input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} className="w-40" />
           </div>
           <Button type="submit" variant="outline">Filtra</Button>
+          <div className="flex gap-1">
+            <Button type="button" variant="ghost" size="sm" onClick={() => applyRange("today")}>Oggi</Button>
+            <Button type="button" variant="ghost" size="sm" onClick={() => applyRange("week")}>Settimana</Button>
+            <Button type="button" variant="ghost" size="sm" onClick={() => applyRange("month")}>Mese</Button>
+          </div>
           <Button type="button" variant="ghost" onClick={() => load(true)} title="Aggiorna">
             <RefreshCw size={16} />
           </Button>

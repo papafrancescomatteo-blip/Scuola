@@ -13,7 +13,8 @@ import {
   ChevronLeft,
   ChevronRight,
   DoorOpen,
-  DoorClosed
+  DoorClosed,
+  ClipboardCheck
 } from "lucide-react";
 
 const SCHOOL_LOGO = "https://customer-assets.emergentagent.com/job_lab-inventory-13/artifacts/qkvfmo8i_cropped-MALIGNANI_logo-ISIS-pittogramma.png";
@@ -110,6 +111,12 @@ export default function Sidebar({ user, logout, activePage }) {
   ];
 
   if (user?.role === "admin" || user?.role === "technician") {
+    navItems.push({
+      id: "registro",
+      label: "Registro accessi",
+      icon: ClipboardCheck,
+      path: "/registro-accessi"
+    });
     navItems.push({ 
       id: "admin", 
       label: user?.role === "admin" ? "Amministrazione" : "Gestione Strumenti", 
