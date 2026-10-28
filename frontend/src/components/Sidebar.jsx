@@ -1,6 +1,8 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { Button } from "./ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "./ui/dialog";
+import { API } from "../App";
 import { 
   LayoutDashboard, 
   Barcode, 
@@ -9,7 +11,9 @@ import {
   Menu, 
   X,
   ChevronLeft,
-  ChevronRight
+  ChevronRight,
+  DoorOpen,
+  DoorClosed
 } from "lucide-react";
 
 const SCHOOL_LOGO = "https://customer-assets.emergentagent.com/job_lab-inventory-13/artifacts/qkvfmo8i_cropped-MALIGNANI_logo-ISIS-pittogramma.png";
@@ -19,9 +23,75 @@ export default function Sidebar({ user, logout, activePage }) {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
 
-  const handleLogout = async () => {
+  // Stato "dentro il laboratorio" (registro accessi)
+  const [labEntry, setLabEntry] = useState(null);
+  const [exitOpen, setExitOpen] = useState(false);
+  const [exitThenLogout, setExitThenLogout] = useState(false);
+  const [exitSaving, setExitSaving] = useState(false);
+  const [exitError, setExitError] = useState("");
+
+  const labHeaders = () => ({ Authorization: `Bearer ${localStorage.getItem("token")}` });
+
+  const loadLabStatus = async () => {
+    try {
+      const res = await fetch(`${API}/lab/status`, { headers: labHeaders(), credentials: "include" });
+      if (res.ok) {
+        const data = await res.json();
+        setLabEntry(data.inside ? data.entry : null);
+      }
+    } catch (e) {
+      /* niente */
+    }
+  };
+
+  useEffect(() => {
+    loadLabStatus();
+    const onChange = () => loadLabStatus();
+    window.addEventListener("lab-status-changed", onChange);
+    return () => window.removeEventListener("lab-status-changed", onChange);
+    // eslint-disable-next-line
+  }, []);
+
+  const doLogout = async () => {
     await logout();
     navigate("/login");
+  };
+
+  const handleLogout = async () => {
+    if (labEntry) {
+      setExitThenLogout(true);
+      setExitError("");
+      setExitOpen(true);
+      return;
+    }
+    await doLogout();
+  };
+
+  const openExitDialog = () => {
+    setExitThenLogout(false);
+    setExitError("");
+    setExitOpen(true);
+  };
+
+  const confirmExit = async () => {
+    setExitSaving(true);
+    setExitError("");
+    try {
+      const res = await fetch(`${API}/lab/exit`, { method: "POST", headers: labHeaders(), credentials: "include" });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setExitError(typeof data.detail === "string" ? data.detail : "Impossibile registrare l'uscita");
+        return;
+      }
+      setLabEntry(null);
+      setExitOpen(false);
+      window.dispatchEvent(new Event("lab-status-changed"));
+      if (exitThenLogout) await doLogout();
+    } catch (e) {
+      setExitError("Errore di connessione. Riprova.");
+    } finally {
+      setExitSaving(false);
+    }
   };
 
   const navItems = [
@@ -111,6 +181,27 @@ export default function Sidebar({ user, logout, activePage }) {
           </div>
         )}
         
+        {labEntry ? (
+          <Button
+            className={`w-full mb-2 bg-amber-500 hover:bg-amber-600 text-white ${collapsed ? 'px-2' : ''}`}
+            onClick={openExitDialog}
+            data-testid="lab-exit-btn"
+          >
+            <DoorClosed size={18} className={collapsed ? '' : 'mr-2'} />
+            {!collapsed && "Uscita dal laboratorio"}
+          </Button>
+        ) : (
+          <Button
+            variant="outline"
+            className={`w-full mb-2 bg-transparent border-slate-600 text-slate-300 hover:text-white hover:bg-slate-700 ${collapsed ? 'px-2' : ''}`}
+            onClick={() => window.dispatchEvent(new Event("lab-open-entry"))}
+            data-testid="lab-entry-btn"
+          >
+            <DoorOpen size={18} className={collapsed ? '' : 'mr-2'} />
+            {!collapsed && "Ingresso in laboratorio"}
+          </Button>
+        )}
+
         <Button
           variant="ghost"
           className={`w-full text-slate-300 hover:text-white hover:bg-slate-700 ${collapsed ? 'px-2' : ''}`}
@@ -158,6 +249,39 @@ export default function Sidebar({ user, logout, activePage }) {
       >
         <NavContent />
       </aside>
+
+      {/* Firma uscita dal laboratorio */}
+      <Dialog open={exitOpen} onOpenChange={setExitOpen}>
+        <DialogContent aria-describedby={undefined}>
+          <DialogHeader>
+            <DialogTitle style={{ fontFamily: 'Work Sans' }}>Uscita dal laboratorio</DialogTitle>
+            <DialogDescription>
+              {labEntry
+                ? `Sei entrato alle ${new Date(labEntry.entry_time).toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Rome" })} (${labEntry.activity}). Confermando firmi digitalmente l'uscita.`
+                : "Confermando firmi digitalmente l'uscita."}
+            </DialogDescription>
+          </DialogHeader>
+          {exitError && (
+            <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">{exitError}</div>
+          )}
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setExitOpen(false)}>Annulla</Button>
+            {exitThenLogout && (
+              <Button variant="outline" onClick={doLogout} data-testid="logout-without-exit-btn">
+                Esci senza firmare
+              </Button>
+            )}
+            <Button
+              onClick={confirmExit}
+              disabled={exitSaving}
+              className="bg-amber-500 hover:bg-amber-600"
+              data-testid="confirm-exit-btn"
+            >
+              {exitSaving ? "Registrazione..." : exitThenLogout ? "Firma uscita ed esci dal sito" : "Conferma uscita e firma"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }
