@@ -10,6 +10,7 @@ import InstrumentDetail from "./pages/InstrumentDetail";
 import AdminPanel from "./pages/AdminPanel";
 import SearchPage from "./pages/SearchPage";
 import LabAccessGate from "./components/LabAccessGate";
+import RegistroAccessi from "./pages/RegistroAccessi";
 
 const configuredBackendUrl = process.env.REACT_APP_BACKEND_URL || "";
 const BACKEND_URL = configuredBackendUrl
@@ -216,6 +217,14 @@ function AppRouter() {
         element={
           <AdminRoute user={user} loading={loading}>
             <AdminPanel user={user} token={token} logout={logout} />
+          </AdminRoute>
+        }
+      />
+      <Route
+        path="/registro-accessi"
+        element={
+          <AdminRoute user={user} loading={loading}>
+            <RegistroAccessi user={user} token={token} logout={logout} />
           </AdminRoute>
         }
       />
