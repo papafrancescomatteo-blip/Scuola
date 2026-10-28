@@ -36,6 +36,8 @@ import {
   TabsTrigger,
 } from "../components/ui/tabs";
 import Sidebar from "../components/Sidebar";
+import NewsManager from "../components/NewsManager";
+import LogsViewer from "../components/LogsViewer";
 import { 
   Plus, 
   Pencil, 
@@ -52,7 +54,9 @@ import {
   Upload,
   CheckCircle,
   AlertTriangle,
-  CreditCard
+  CreditCard,
+  Megaphone,
+  ScrollText
 } from "lucide-react";
 import { API } from "../App";
 
@@ -539,7 +543,7 @@ export default function AdminPanel({ user, token, logout }) {
 
           <Tabs defaultValue="instruments" className="space-y-6">
             {user?.role === "admin" ? (
-              <TabsList className="grid w-full max-w-lg grid-cols-3">
+              <TabsList className="grid w-full max-w-3xl grid-cols-5">
                 <TabsTrigger value="instruments" data-testid="instruments-tab">
                   <Package size={16} className="mr-2" />
                   Strumenti
@@ -552,14 +556,38 @@ export default function AdminPanel({ user, token, logout }) {
                   <Users size={16} className="mr-2" />
                   Utenti
                 </TabsTrigger>
+                <TabsTrigger value="news" data-testid="news-tab">
+                  <Megaphone size={16} className="mr-2" />
+                  News
+                </TabsTrigger>
+                <TabsTrigger value="logs" data-testid="logs-tab">
+                  <ScrollText size={16} className="mr-2" />
+                  Registro
+                </TabsTrigger>
               </TabsList>
             ) : (
-              <TabsList className="grid w-full max-w-xs grid-cols-1">
+              <TabsList className="grid w-full max-w-sm grid-cols-2">
                 <TabsTrigger value="instruments" data-testid="instruments-tab">
                   <Package size={16} className="mr-2" />
                   Strumenti
                 </TabsTrigger>
+                <TabsTrigger value="news" data-testid="news-tab">
+                  <Megaphone size={16} className="mr-2" />
+                  News
+                </TabsTrigger>
               </TabsList>
+            )}
+
+            {/* News Tab */}
+            <TabsContent value="news">
+              <NewsManager token={token} />
+            </TabsContent>
+
+            {/* Logs Tab (solo admin) */}
+            {user?.role === "admin" && (
+              <TabsContent value="logs">
+                <LogsViewer token={token} />
+              </TabsContent>
             )}
 
             {/* Instruments Tab */}
