@@ -14,6 +14,7 @@ const CATEGORIES = [
   ["strumenti", "Strumenti"],
   ["movimenti", "Prelievi e depositi"],
   ["destinazioni", "Destinazioni"],
+  ["laboratorio", "Ingressi e uscite lab"],
   ["utenti", "Utenti e tessere"],
   ["news", "News"],
   ["registro", "Registro"]
@@ -28,6 +29,7 @@ const categoryColor = (c) => {
     case "movimenti": return "bg-amber-100 text-amber-700";
     case "destinazioni": return "bg-purple-100 text-purple-700";
     case "utenti": return "bg-rose-100 text-rose-700";
+    case "laboratorio": return "bg-cyan-100 text-cyan-700";
     default: return "bg-slate-100 text-slate-700";
   }
 };
