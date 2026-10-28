@@ -9,6 +9,7 @@ import Dashboard from "./pages/Dashboard";
 import InstrumentDetail from "./pages/InstrumentDetail";
 import AdminPanel from "./pages/AdminPanel";
 import SearchPage from "./pages/SearchPage";
+import LabAccessGate from "./components/LabAccessGate";
 
 const configuredBackendUrl = process.env.REACT_APP_BACKEND_URL || "";
 const BACKEND_URL = configuredBackendUrl
@@ -49,6 +50,7 @@ export const useAuth = () => {
   }, []);
 
   const login = (userData, authToken) => {
+    try { sessionStorage.removeItem("lab_prompt_dismissed"); } catch (e) { /* niente */ }
     setUser(userData);
     setToken(authToken);
     localStorage.setItem("token", authToken);
@@ -63,6 +65,7 @@ export const useAuth = () => {
     } catch (e) {
       console.error("Logout error:", e);
     }
+    try { sessionStorage.removeItem("lab_prompt_dismissed"); } catch (e) { /* niente */ }
     setUser(null);
     setToken(null);
     localStorage.removeItem("token");
@@ -169,6 +172,8 @@ function AppRouter() {
   }
 
   return (
+    <>
+    {user && <LabAccessGate user={user} token={token} />}
     <Routes>
       <Route 
         path="/login" 
@@ -217,6 +222,7 @@ function AppRouter() {
       <Route path="/" element={<Navigate to="/login" replace />} />
       <Route path="*" element={<Navigate to="/dashboard" replace />} />
     </Routes>
+    </>
   );
 }
 
