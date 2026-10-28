@@ -18,6 +18,8 @@ import re
 import hmac
 import hashlib
 import asyncio
+from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo
 from datetime import date as date_type
 
 ROOT_DIR = Path(__file__).parent
@@ -60,6 +62,15 @@ class UserResponse(BaseModel):
     picture: Optional[str] = None
     has_badge: bool = False
     created_at: datetime
+
+class LabEntry(BaseModel):
+    reason: Optional[str] = None
+
+class LabEntryCreate(BaseModel):
+    cognome: str
+    nome: str
+    class_name: str   # "Prof." oppure la classe dello studente (es. 4A MEC)
+    activity: str
 
 class NewsCreate(BaseModel):
     title: str
@@ -923,6 +934,304 @@ async def delete_user(user_id: str, current_user: dict = Depends(require_admin))
     await log_event(current_user, "utenti", "Utente eliminato", f"{(old or {}).get('name')} ({(old or {}).get('email')})")
     
     return {"message": "User deleted successfully"}
+
+# ============== REGISTRO ACCESSI AL LABORATORIO ==============
+
+ROME = ZoneInfo("Europe/Rome")
+
+def _today_rome() -> str:
+    return datetime.now(ROME).date().isoformat()
+
+async def _open_access(user_id: str):
+    """Ultimo ingresso non ancora chiuso da una firma di uscita."""
+    return await db.lab_access.find_one(
+        {"user_id": user_id, "exit_time": None, "exit_missing": {"$ne": True}},
+        {"_id": 0},
+        sort=[("entry_time", -1)],
+    )
+
+@api_router.get("/lab-access/current")
+async def lab_access_current(current_user: dict = Depends(get_current_user)):
+    rec = await _open_access(current_user["user_id"])
+    if rec and rec.get("date") == _today_rome():
+        return {"in_lab": True, "record": rec}
+    return {"in_lab": False, "record": None}
+
+@api_router.post("/lab-access/entry")
+async def lab_access_entry(data: LabEntry, current_user: dict = Depends(get_current_user)):
+    rec = await _open_access(current_user["user_id"])
+    if rec:
+        if rec.get("date") == _today_rome():
+            return {"in_lab": True, "record": rec}
+        # ingresso di un giorno passato senza firma di uscita: lo segna come "uscita non firmata"
+        await db.lab_access.update_many(
+            {"user_id": current_user["user_id"], "exit_time": None},
+            {"$set": {"exit_missing": True}},
+        )
+    now = datetime.now(timezone.utc)
+    record = {
+        "access_id": f"acc_{uuid.uuid4().hex[:12]}",
+        "user_id": current_user["user_id"],
+        "user_name": current_user.get("name"),
+        "user_email": current_user.get("email"),
+        "role": current_user.get("role"),
+        "date": now.astimezone(ROME).date().isoformat(),
+        "entry_time": now.isoformat(),
+        "exit_time": None,
+        "exit_missing": False,
+        "reason": (data.reason or "").strip()[:200] or None,
+    }
+    await db.lab_access.insert_one(record)
+    record.pop("_id", None)
+    await log_event(current_user, "laboratorio", "Ingresso in laboratorio", record["reason"] or "")
+    return {"in_lab": True, "record": record}
+
+@api_router.post("/lab-access/exit")
+async def lab_access_exit(current_user: dict = Depends(get_current_user)):
+    rec = await _open_access(current_user["user_id"])
+    if not rec:
+        raise HTTPException(status_code=400, detail="Nessun ingresso da chiudere")
+    exit_time = datetime.now(timezone.utc).isoformat()
+    await db.lab_access.update_one({"access_id": rec["access_id"]}, {"$set": {"exit_time": exit_time}})
+    await log_event(current_user, "laboratorio", "Uscita dal laboratorio", "Uscita firmata")
+    rec["exit_time"] = exit_time
+    return {"in_lab": False, "record": rec}
+
+def _lab_query(date_from: Optional[str], date_to: Optional[str], search: Optional[str]) -> dict:
+    query = {}
+    dates = {}
+    if date_from:
+        dates["$gte"] = date_from
+    if date_to:
+        dates["$lte"] = date_to
+    if dates:
+        query["date"] = dates
+    if search:
+        rx = {"$regex": re.escape(search), "$options": "i"}
+        query["$or"] = [{"user_name": rx}, {"user_email": rx}, {"reason": rx}]
+    return query
+
+@api_router.get("/lab-access")
+async def get_lab_access(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    search: Optional[str] = None,
+    limit: int = 100,
+    skip: int = 0,
+    current_user: dict = Depends(require_admin),
+):
+    query = _lab_query(date_from, date_to, search)
+    total = await db.lab_access.count_documents(query)
+    items = await db.lab_access.find(query, {"_id": 0}).sort("entry_time", -1).skip(max(skip, 0)).to_list(max(1, min(limit, 500)))
+    return {"items": items, "total": total}
+
+@api_router.get("/lab-access/export")
+async def export_lab_access(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    search: Optional[str] = None,
+    current_user: dict = Depends(require_admin),
+):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    items = await db.lab_access.find(_lab_query(date_from, date_to, search), {"_id": 0}).sort("entry_time", -1).to_list(20000)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Accessi laboratorio"
+    ws.append(["Data", "Nome", "Email", "Ora ingresso", "Ora uscita", "Durata (min)", "Motivo", "Uscita non firmata"])
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="1E3A8A")
+    for it in items:
+        entry = datetime.fromisoformat(it["entry_time"]).astimezone(ROME)
+        exit_dt = datetime.fromisoformat(it["exit_time"]).astimezone(ROME) if it.get("exit_time") else None
+        minutes = round((exit_dt - entry).total_seconds() / 60) if exit_dt else None
+        ws.append([
+            entry.strftime("%d/%m/%Y"), it.get("user_name") or "-", it.get("user_email") or "-",
+            entry.strftime("%H:%M"), exit_dt.strftime("%H:%M") if exit_dt else "",
+            minutes if minutes is not None else "", it.get("reason") or "",
+            "Sì" if it.get("exit_missing") else "",
+        ])
+    for col, w in zip("ABCDEFGH", [12, 24, 30, 13, 12, 13, 40, 18]):
+        ws.column_dimensions[col].width = w
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    await log_event(current_user, "registro", "Esportazione accessi laboratorio", f"{len(items)} righe")
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="accessi_laboratorio.xlsx"'},
+    )
+
+# ============== REGISTRO ACCESSI LABORATORIO ==============
+
+ROME = ZoneInfo("Europe/Rome")
+
+def _rome_day_start_utc(day: str) -> str:
+    """'2026-10-28' -> inizio di quel giorno (ora italiana) in UTC, come testo ISO."""
+    d = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=ROME)
+    return d.astimezone(timezone.utc).isoformat()
+
+def _lab_query(date_from: Optional[str], date_to: Optional[str], search: Optional[str]) -> dict:
+    query = {}
+    try:
+        if date_from:
+            query.setdefault("entry_time", {})["$gte"] = _rome_day_start_utc(date_from)
+        if date_to:
+            end = datetime.strptime(date_to, "%Y-%m-%d").replace(tzinfo=ROME) + timedelta(days=1)
+            query.setdefault("entry_time", {})["$lt"] = end.astimezone(timezone.utc).isoformat()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Data non valida (usa AAAA-MM-GG)")
+    if search:
+        rx = {"$regex": re.escape(search), "$options": "i"}
+        query["$or"] = [{"cognome": rx}, {"nome": rx}, {"class_name": rx}, {"activity": rx}]
+    return query
+
+async def _open_entry(user_id: str):
+    """Ingresso senza uscita. Se è di un giorno passato lo chiude come 'uscita non registrata'."""
+    entry = await db.lab_access.find_one(
+        {"user_id": user_id, "exit_time": None, "exit_missing": {"$ne": True}}, {"_id": 0}
+    )
+    if not entry:
+        return None
+    entered = datetime.fromisoformat(entry["entry_time"]).astimezone(ROME).date()
+    if entered < datetime.now(ROME).date():
+        await db.lab_access.update_one({"access_id": entry["access_id"]}, {"$set": {"exit_missing": True}})
+        return None
+    return entry
+
+@api_router.get("/lab/status")
+async def lab_status(current_user: dict = Depends(get_current_user)):
+    entry = await _open_entry(current_user["user_id"])
+    last = await db.lab_access.find({"user_id": current_user["user_id"]}, {"_id": 0}).sort("entry_time", -1).to_list(1)
+    last_info = None
+    if last:
+        last_info = {k: last[0].get(k) for k in ("cognome", "nome", "class_name")}
+    return {"inside": bool(entry), "entry": entry, "last": last_info}
+
+@api_router.post("/lab/entry")
+async def lab_entry(data: LabEntryCreate, current_user: dict = Depends(get_current_user)):
+    cognome, nome = data.cognome.strip(), data.nome.strip()
+    class_name, activity = data.class_name.strip(), data.activity.strip()
+    if not cognome or not nome or not class_name or not activity:
+        raise HTTPException(status_code=400, detail="Compila cognome, nome, classe (o Prof.) e attività svolta")
+    existing = await _open_entry(current_user["user_id"])
+    if existing:
+        return {"inside": True, "entry": existing}
+    entry = {
+        "access_id": f"acc_{uuid.uuid4().hex[:12]}",
+        "user_id": current_user["user_id"],
+        "user_email": current_user.get("email"),
+        "cognome": cognome[:60],
+        "nome": nome[:60],
+        "class_name": class_name[:40],
+        "activity": activity[:300],
+        "entry_time": datetime.now(timezone.utc).isoformat(),
+        "exit_time": None,
+        "exit_missing": False,
+        "signed_by": current_user.get("name"),
+    }
+    await db.lab_access.insert_one(entry)
+    entry.pop("_id", None)
+    await log_event(current_user, "laboratorio", "Ingresso in laboratorio", f"{cognome} {nome} ({entry['class_name']}) - {entry['activity']}")
+    return {"inside": True, "entry": entry}
+
+@api_router.post("/lab/exit")
+async def lab_exit(current_user: dict = Depends(get_current_user)):
+    entry = await _open_entry(current_user["user_id"])
+    if not entry:
+        raise HTTPException(status_code=400, detail="Non risulti dentro il laboratorio")
+    exit_time = datetime.now(timezone.utc).isoformat()
+    await db.lab_access.update_one({"access_id": entry["access_id"]}, {"$set": {"exit_time": exit_time}})
+    entry["exit_time"] = exit_time
+    await log_event(current_user, "laboratorio", "Uscita dal laboratorio", f"{entry['cognome']} {entry['nome']}")
+    return {"inside": False, "entry": entry}
+
+@api_router.get("/lab/access")
+async def lab_access_list(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    search: Optional[str] = None,
+    limit: int = 100,
+    skip: int = 0,
+    current_user: dict = Depends(require_admin_or_technician),
+):
+    query = _lab_query(date_from, date_to, search)
+    total = await db.lab_access.count_documents(query)
+    items = await db.lab_access.find(query, {"_id": 0}).sort("entry_time", -1).skip(max(skip, 0)).to_list(max(1, min(limit, 500)))
+    return {"items": items, "total": total}
+
+@api_router.get("/lab/access/export")
+async def lab_access_export(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    search: Optional[str] = None,
+    current_user: dict = Depends(require_admin_or_technician),
+):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    items = await db.lab_access.find(_lab_query(date_from, date_to, search), {"_id": 0}).sort("entry_time", 1).to_list(20000)
+
+    now = datetime.now(ROME)
+    start_year = now.year if now.month >= 9 else now.year - 1
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Registro accessi"
+    ws.append(["REGISTRO ACCESSI – LABORATORIO DI METROLOGIA"])
+    ws.append([f"Anno scolastico {start_year}/{start_year + 1}"])
+    ws.append([])
+    headers = ["Data", "Cognome", "Nome", "Classe", "Ora ingresso", "Ora uscita", "Attività svolta", "Firma"]
+    ws.append(headers)
+    ws["A1"].font = Font(bold=True, size=14)
+    ws["A2"].font = Font(italic=True)
+    thin = Side(style="thin", color="999999")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    for cell in ws[4]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="1E3A8A")
+        cell.border = border
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    for it in items:
+        entered = datetime.fromisoformat(it["entry_time"]).astimezone(ROME)
+        exited = datetime.fromisoformat(it["exit_time"]).astimezone(ROME) if it.get("exit_time") else None
+        if exited:
+            firma = f"Firmato digitalmente: {it.get('signed_by') or ''}"
+        elif it.get("exit_missing"):
+            firma = f"Uscita non registrata ({it.get('signed_by') or ''})"
+        else:
+            firma = f"Ingresso firmato: {it.get('signed_by') or ''} (ancora dentro)"
+        ws.append([
+            entered.strftime("%d/%m/%Y"), it.get("cognome"), it.get("nome"), it.get("class_name"),
+            entered.strftime("%H:%M"), exited.strftime("%H:%M") if exited else "", it.get("activity"), firma,
+        ])
+    for row in ws.iter_rows(min_row=5, max_row=ws.max_row):
+        for cell in row:
+            cell.border = border
+            cell.alignment = Alignment(vertical="center", wrap_text=True)
+    for col, w in zip("ABCDEFGH", [12, 18, 18, 12, 13, 12, 44, 36]):
+        ws.column_dimensions[col].width = w
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    await log_event(current_user, "registro", "Esportazione registro accessi", f"{len(items)} righe")
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="registro_accessi_laboratorio.xlsx"'},
+    )
+
+@api_router.delete("/lab/access/{access_id}")
+async def lab_access_delete(access_id: str, current_user: dict = Depends(require_admin)):
+    old = await db.lab_access.find_one({"access_id": access_id}, {"_id": 0})
+    result = await db.lab_access.delete_one({"access_id": access_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Riga non trovata")
+    await log_event(current_user, "laboratorio", "Riga registro accessi eliminata",
+                    f"{(old or {}).get('cognome')} {(old or {}).get('nome')} del {(old or {}).get('entry_time', '')[:10]}")
+    return {"message": "Riga eliminata"}
 
 # ============== NEWS ==============
 
