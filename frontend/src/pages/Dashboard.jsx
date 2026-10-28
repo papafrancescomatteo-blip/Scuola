@@ -20,7 +20,7 @@ import {
   SelectValue,
 } from "../components/ui/select";
 import Sidebar from "../components/Sidebar";
-import { Search, Package, CheckCircle, Clock, Users, Activity, Barcode } from "lucide-react";
+import { Search, Package, CheckCircle, Clock, Users, Activity, Barcode, Megaphone } from "lucide-react";
 import { API } from "../App";
 
 export default function Dashboard({ user, token, logout }) {
@@ -32,11 +32,17 @@ export default function Dashboard({ user, token, logout }) {
   const [statusFilter, setStatusFilter] = useState("all");
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [categories, setCategories] = useState([]);
+  const [news, setNews] = useState([]);
 
   const fetchData = async () => {
     try {
       const headers = { Authorization: `Bearer ${token}` };
       
+      fetch(`${API}/news?limit=5`, { headers, credentials: "include" })
+        .then((r) => (r.ok ? r.json() : []))
+        .then(setNews)
+        .catch(() => {});
+
       const [instrumentsRes, statsRes, categoriesRes] = await Promise.all([
         fetch(`${API}/instruments`, { headers, credentials: "include" }),
         fetch(`${API}/stats`, { headers, credentials: "include" }),
@@ -132,6 +138,37 @@ export default function Dashboard({ user, token, logout }) {
               Cerca per Codice a Barre
             </Button>
           </div>
+
+          {/* News */}
+          {news.length > 0 && (
+            <Card className="mb-8" data-testid="news-section">
+              <CardHeader className="pb-3">
+                <CardTitle className="text-lg" style={{ fontFamily: 'Work Sans' }}>
+                  <Megaphone className="inline mr-2 h-5 w-5 text-blue-600" />
+                  News
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {news.map((item) => (
+                  <div
+                    key={item.news_id}
+                    className={`p-4 rounded-lg border ${item.important ? "bg-amber-50 border-amber-200" : "bg-slate-50 border-slate-200"}`}
+                  >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="font-medium text-slate-900">{item.title}</p>
+                      {item.important && (
+                        <Badge className="bg-amber-200 text-amber-800 hover:bg-amber-200">Importante</Badge>
+                      )}
+                    </div>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      {new Date(item.created_at).toLocaleDateString("it-IT")} · {item.author_name}
+                    </p>
+                    <p className="text-sm text-slate-700 mt-2 whitespace-pre-wrap">{item.body}</p>
+                  </div>
+                ))}
+              </CardContent>
+            </Card>
+          )}
 
           {/* Stats Grid */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
