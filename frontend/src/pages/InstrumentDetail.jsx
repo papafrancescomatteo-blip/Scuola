@@ -3,6 +3,7 @@ import { useParams, useNavigate } from "react-router-dom";
 import { Button } from "../components/ui/button";
 import { Label } from "../components/ui/label";
 import { Textarea } from "../components/ui/textarea";
+import { Input } from "../components/ui/input";
 import { Badge } from "../components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
 import {
@@ -13,13 +14,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "../components/ui/dialog";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "../components/ui/select";
 import Sidebar from "../components/Sidebar";
 import { 
   ArrowLeft, 
@@ -48,6 +42,8 @@ export default function InstrumentDetail({ user, token, logout }) {
   const [showPrelievoDialog, setShowPrelievoDialog] = useState(false);
   const [showDepositoDialog, setShowDepositoDialog] = useState(false);
   const [selectedDestination, setSelectedDestination] = useState("");
+  const [destinationError, setDestinationError] = useState("");
+  const [addingDestination, setAddingDestination] = useState(false);
   const [notes, setNotes] = useState("");
 
   const fetchData = async () => {
@@ -87,8 +83,38 @@ export default function InstrumentDetail({ user, token, logout }) {
     fetchData();
   }, [id, token]);
 
+  const destinationExists = destinations.some(
+    (d) => d.name.trim().toLowerCase() === selectedDestination.trim().toLowerCase()
+  );
+
+  const addDestination = async () => {
+    const name = selectedDestination.trim();
+    if (!name) return;
+    setDestinationError("");
+    setAddingDestination(true);
+    try {
+      const response = await fetch(`${API}/destinations`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ name }),
+        credentials: "include"
+      });
+      const data = await response.json().catch(() => ({}));
+      if (response.ok) {
+        setDestinations((prev) => [...prev, data]);
+        setSelectedDestination(data.name);
+      } else {
+        setDestinationError(typeof data.detail === "string" ? data.detail : "Impossibile aggiungere la destinazione");
+      }
+    } catch (error) {
+      setDestinationError("Errore di connessione. Riprova.");
+    } finally {
+      setAddingDestination(false);
+    }
+  };
+
   const handlePrelievo = async () => {
-    if (!selectedDestination) return;
+    if (!selectedDestination || !destinationExists) return;
     
     setActionLoading(true);
     try {
@@ -430,25 +456,42 @@ export default function InstrumentDetail({ user, token, logout }) {
               
               <div className="space-y-2">
                 <Label htmlFor="destination">Destinazione *</Label>
-                {destinations.length > 0 ? (
-                  <Select value={selectedDestination} onValueChange={setSelectedDestination}>
-                    <SelectTrigger data-testid="prelievo-destination-select">
-                      <SelectValue placeholder="Seleziona destinazione..." />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {destinations.map((dest) => (
-                        <SelectItem key={dest.destination_id} value={dest.name}>
-                          {dest.name}
-                          {dest.description && ` - ${dest.description}`}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                ) : (
-                  <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-700 text-sm">
-                    Nessuna destinazione configurata. Chiedi all'amministratore di aggiungere le destinazioni.
+                <Input
+                  id="destination"
+                  list="destinations-list"
+                  placeholder="Scrivi per cercare (es. LAM 4, A.2.04)..."
+                  value={selectedDestination}
+                  onChange={(e) => {
+                    setSelectedDestination(e.target.value);
+                    setDestinationError("");
+                  }}
+                  autoComplete="off"
+                  data-testid="prelievo-destination-input"
+                />
+                <datalist id="destinations-list">
+                  {destinations.map((dest) => (
+                    <option key={dest.destination_id} value={dest.name}>
+                      {dest.description || ""}
+                    </option>
+                  ))}
+                </datalist>
+
+                {selectedDestination.trim() && !destinationExists && (
+                  <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-sm space-y-2">
+                    <p>Destinazione non trovata nell'elenco.</p>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={addDestination}
+                      disabled={addingDestination}
+                      data-testid="add-destination-btn"
+                    >
+                      {addingDestination ? "Aggiunta..." : `Aggiungi "${selectedDestination.trim()}" alle destinazioni`}
+                    </Button>
                   </div>
                 )}
+                {destinationError && <p className="text-sm text-red-600">{destinationError}</p>}
               </div>
               
               <div className="space-y-2">
@@ -468,7 +511,7 @@ export default function InstrumentDetail({ user, token, logout }) {
               </Button>
               <Button 
                 onClick={handlePrelievo}
-                disabled={!selectedDestination || actionLoading}
+                disabled={!selectedDestination || !destinationExists || actionLoading}
                 className="bg-amber-500 hover:bg-amber-600"
                 data-testid="confirm-prelievo-btn"
               >
