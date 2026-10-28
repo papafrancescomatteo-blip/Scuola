@@ -1223,6 +1223,78 @@ async def lab_access_export(
         headers={"Content-Disposition": 'attachment; filename="registro_accessi_laboratorio.xlsx"'},
     )
 
+@api_router.get("/lab/access/export-docx")
+async def lab_access_export_docx(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    search: Optional[str] = None,
+    current_user: dict = Depends(require_admin_or_technician),
+):
+    """Registro accessi compilato, nel formato del modulo Word originale."""
+    import copy
+    from docx import Document
+    from docx.oxml.ns import qn
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    template_path = ROOT_DIR / "templates" / "registro_accessi.docx"
+    if not template_path.exists():
+        raise HTTPException(status_code=500, detail="Modello Word non trovato sul server")
+
+    items = await db.lab_access.find(_lab_query(date_from, date_to, search), {"_id": 0}).sort("entry_time", 1).to_list(5000)
+
+    doc = Document(str(template_path))
+    table = doc.tables[0]
+    blank_row = copy.deepcopy(table.rows[1]._tr)
+    for row in list(table.rows)[1:]:
+        table._tbl.remove(row._tr)
+
+    centered = {0, 3, 4, 5}  # Data, Classe, Ora ingresso, Ora uscita
+
+    def add_row(values):
+        tr = copy.deepcopy(blank_row)
+        table._tbl.append(tr)
+        row = table.rows[-1]
+        for idx, value in enumerate(values):
+            para = row.cells[idx].paragraphs[0]
+            if value:
+                para.add_run(str(value))
+            if idx in centered:
+                para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    for it in items:
+        entered = datetime.fromisoformat(it["entry_time"]).astimezone(ROME)
+        exited = datetime.fromisoformat(it["exit_time"]).astimezone(ROME) if it.get("exit_time") else None
+        signer = it.get("signed_by") or ""
+        if exited:
+            firma = f"Firma digitale: {signer}"
+        elif it.get("exit_missing"):
+            firma = f"{signer} (uscita non firmata)"
+        else:
+            firma = f"{signer} (ancora dentro)"
+        add_row([
+            entered.strftime("%d/%m/%Y"), it.get("cognome"), it.get("nome"), it.get("class_name"),
+            entered.strftime("%H:%M"), exited.strftime("%H:%M") if exited else "", it.get("activity"), firma,
+        ])
+    for _ in range(max(0, 12 - len(items))):  # righe vuote come sul foglio cartaceo
+        add_row([""] * 8)
+
+    # Anno scolastico nell'intestazione (es. 2026.2027), calcolato dalla data del primo accesso
+    ref = datetime.fromisoformat(items[0]["entry_time"]).astimezone(ROME) if items else datetime.now(ROME)
+    start_year = ref.year if ref.month >= 9 else ref.year - 1
+    for section in doc.sections:
+        for node in section.header._element.iter(qn("w:t")):
+            if node.text and re.fullmatch(r"\d{4}[./]\d{4}", node.text.strip()):
+                node.text = f"{start_year}.{start_year + 1}"
+
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    await log_event(current_user, "registro", "Esportazione registro accessi (Word)", f"{len(items)} righe")
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": 'attachment; filename="registro_accessi_laboratorio.docx"'},
+    )
+
 @api_router.delete("/lab/access/{access_id}")
 async def lab_access_delete(access_id: str, current_user: dict = Depends(require_admin)):
     old = await db.lab_access.find_one({"access_id": access_id}, {"_id": 0})
