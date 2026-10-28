@@ -76,6 +76,7 @@ class NewsCreate(BaseModel):
     title: str
     body: str
     important: bool = False
+    public: bool = True  # visibile anche nella pagina di accesso, senza login
 
 class BadgeData(BaseModel):
     badge: str
@@ -1307,6 +1308,16 @@ async def lab_access_delete(access_id: str, current_user: dict = Depends(require
 
 # ============== NEWS ==============
 
+@api_router.get("/news/public")
+async def get_public_news(limit: int = 3):
+    """News visibili nella pagina di accesso (senza login): solo quelle segnate come pubbliche, senza autore."""
+    items = await db.news.find({"public": True}, {"_id": 0}).sort("created_at", -1).to_list(max(1, min(limit, 10)))
+    return [
+        {"news_id": n["news_id"], "title": n["title"], "body": n["body"],
+         "important": n.get("important", False), "created_at": n["created_at"]}
+        for n in items
+    ]
+
 @api_router.get("/news")
 async def get_news(limit: int = 20, current_user: dict = Depends(get_current_user)):
     items = await db.news.find({}, {"_id": 0}).sort("created_at", -1).to_list(max(1, min(limit, 100)))
@@ -1322,13 +1333,14 @@ async def create_news(data: NewsCreate, current_user: dict = Depends(require_adm
         "title": title[:150],
         "body": body[:3000],
         "important": data.important,
+        "public": data.public,
         "author_name": current_user.get("name"),
         "author_id": current_user.get("user_id"),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     await db.news.insert_one(item)
     item.pop("_id", None)
-    await log_event(current_user, "news", "News pubblicata", item["title"])
+    await log_event(current_user, "news", "News pubblicata", item["title"] + (" (anche nella pagina di accesso)" if item["public"] else ""))
     return item
 
 @api_router.delete("/news/{news_id}")
