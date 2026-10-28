@@ -61,6 +61,11 @@ class UserResponse(BaseModel):
     has_badge: bool = False
     created_at: datetime
 
+class NewsCreate(BaseModel):
+    title: str
+    body: str
+    important: bool = False
+
 class BadgeData(BaseModel):
     badge: str
 
@@ -210,6 +215,56 @@ async def require_admin_or_technician(current_user: dict = Depends(get_current_u
         raise HTTPException(status_code=403, detail="Admin or Technician access required")
     return current_user
 
+# ============== LOG (registro attività) ==============
+
+async def log_event(user, category: str, action: str, details: str = ""):
+    """Scrive una riga nel registro. Non deve mai far fallire l'operazione principale."""
+    try:
+        user = user or {}
+        await db.logs.insert_one({
+            "log_id": f"log_{uuid.uuid4().hex[:12]}",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "user_id": user.get("user_id"),
+            "user_name": user.get("name"),
+            "user_email": user.get("email"),
+            "category": category,
+            "action": action,
+            "details": details,
+        })
+    except Exception:
+        logger.exception("Impossibile scrivere il log")
+
+# Aule e laboratori dell'ISIS Malignani (aggiunte una sola volta come destinazioni)
+SCHOOL_ROOMS = [
+    'A.1.01', 'A.1.02', 'A.1.03', 'A.1.04', 'A.1.05', 'A.1.06',
+    'A.1.07', 'A.1.08', 'A.1.09', 'A.1.10', 'A.1.11', 'A.1.12',
+    'A.1.13', 'A.1.14', 'A.2.01 Lab', 'A.2.02 Lab', 'A.2.03', 'A.2.04',
+    'A.2.05', 'A.2.06', 'A.2.07', 'A.2.08', 'A.2.09', 'A.2.10',
+    'A.2.11 Lab', 'A.2.12 TEAL', 'A.S.1', 'A.S.2', 'A.S.3', 'A.S.4',
+    'B.0.04 Lab', 'B.0.05 CAD', 'B.1.1 ECDL', 'B.2.01 G', 'B.2.02 / B.2.03 Fis G', 'B.2.05',
+    'B.2.06', 'B.2.07', 'B.2.10 Lab Chi', 'B.2.12 Lab Chi', 'B.2.15 G', 'B.2.16 G',
+    'B.2.17 Lab Fisica', 'B.2.18 b', 'B.2.18 c', 'C.0.01', 'C.0.02', 'C.0.03',
+    'C.0.04', 'C.0.05', 'C.0.06', 'C.0.07 TEAL', 'C.0.08 TEAL', 'C.0.09',
+    'C.0.10', 'C.1.01', 'C.1.02', 'C.1.03', 'C.1.04', 'C.1.05',
+    'C.1.06', 'C.1.07', 'C.1.08', 'C.1.09', 'C.1.10', 'C.2.01',
+    'C.2.02', 'C.2.03', 'C.2.04', 'C.2.05', 'C.2.06', 'C.2.07 TEAL',
+    'C.2.08 TEAL', 'C.2.09', 'C.2.10', 'E.0.01 Lab', 'E.0.03 G', 'E.0.04 G',
+    'E.0.05 SISTEMI ELT', 'E.0.07a Lab SISTEMI', 'E.0.07B', 'E.0.09 G', 'E.0.10 G', 'E.0.11 Lab TDP Tele Eli',
+    'E.0.14 Lab ELT', 'E.0.15 MISURE E', 'E.0.16A', 'E.0.16B Lab TDP ELT AUT', 'E.0.18 ASEM Lab', 'E.0.19 Lab Progettazione',
+    'E.0.20 Lab', 'E.0.21', 'E.S.03 PC15', 'E.S.14', 'E.S.15', 'E.S.16',
+    'E.S.22', 'E.S.23', 'E.S.24', 'E.S.25', 'E.S.26 Aula Immersiva', 'E.S.27',
+    'F.0 CNC', 'F.0 Hangar', 'F.0 LAM 1', 'F.0 LAM 2', 'F.0 MEC.01 Metrologia', 'F.0 MEC.02-QMEC',
+    'F.0 MEC.03-QTEL', 'F.0 MEC.06', 'F.0 MEC.08', 'F.0 MEC.09', 'F.0 MEC.10', 'F.0 MEC.11 LAB Aggiustaggio',
+    'F.0 MEC.11 LAB Carpenteria', 'F.0 MEC.11 LAB Saldatura', 'F.0 MUT.1', 'F.0 MUT.2', 'F.0 MUT.3', 'F.0.02 Lab Prove Mat',
+    'F.0.03 G', 'F.0.04 G', 'F.0.06/a Smart Lab', 'F.0.06/b TEAL Smart', 'F.0.08A', 'F.0.08B TEAL',
+    'F.0.09 G', 'F.0.10 G', 'F.0.12 - Petri Lab CAD', 'F.0.14', 'F.0.15 TEAL Lardinelli', 'F.0.16',
+    'F.0.17 G', 'F.0.19', 'F.0.20 TEAL', 'F.0.22A', 'F.0.22B Lab. TEAL Topografia', 'F.0.23',
+    'F.0.24', 'F.0.26', 'F.0.27', 'F.0.28a Lab Mod', 'F.S.05 Lab CAD', 'F.S.10 Lab. chi',
+    'F.S.11 aula/F.S.09 Lab. bio', 'F.S.15', 'F.S.17 Lab', 'F.S.18 Lab', 'F.S.19 Lab Inf / CAD', 'F.S.24 Lab CAD',
+    'F.S.25', 'LAB MUT', 'LAM 3', 'LAM 4',
+]
+
+
 # ============== AUTH ENDPOINTS ==============
 
 @api_router.post("/auth/register")
@@ -234,6 +289,7 @@ async def register(user_data: UserCreate):
     await db.users.insert_one(user_doc)
     del user_doc["password_hash"]
     user_doc.pop("_id", None)
+    await log_event(user_doc, "accessi", "Registrazione", f"Nuovo account creato con ruolo {user_doc['role']}")
     
     token = create_jwt_token(user_id, user_data.email, user_doc["role"])
     
@@ -242,13 +298,12 @@ async def register(user_data: UserCreate):
 @api_router.post("/auth/login")
 async def login(user_data: UserLogin, response: Response):
     user = await db.users.find_one({"email": user_data.email}, {"_id": 0})
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    
-    if not verify_password(user_data.password, user.get("password_hash", "")):
+    if not user or not verify_password(user_data.password, user.get("password_hash", "")):
+        await log_event({"email": user_data.email}, "accessi", "Accesso fallito", f"Tentativo con email {user_data.email}")
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
     token = create_jwt_token(user["user_id"], user["email"], user["role"])
+    await log_event(user, "accessi", "Accesso", "Login con email e password")
     
     user_response = public_user(user)
     
@@ -260,8 +315,10 @@ async def badge_login(data: BadgeData):
     user = await db.users.find_one({"badge_hash": hash_badge(code)}, {"_id": 0}) if len(code) >= 4 else None
     if not user:
         await asyncio.sleep(0.7)  # rallenta i tentativi a caso
+        await log_event(None, "accessi", "Accesso con tessera fallito", "Tessera non riconosciuta")
         raise HTTPException(status_code=401, detail="Tessera non riconosciuta")
     token = create_jwt_token(user["user_id"], user["email"], user["role"])
+    await log_event(user, "accessi", "Accesso con tessera", "Login con tessera")
     return {"user": public_user(user), "token": token}
 
 @api_router.post("/auth/google-session")
@@ -347,8 +404,13 @@ async def get_destinations(current_user: dict = Depends(get_current_user)):
     return destinations
 
 @api_router.post("/destinations")
-async def create_destination(data: DestinationCreate, current_user: dict = Depends(require_admin)):
-    existing = await db.destinations.find_one({"name": data.name}, {"_id": 0})
+async def create_destination(data: DestinationCreate, current_user: dict = Depends(get_current_user)):
+    data.name = (data.name or "").strip()
+    if not data.name:
+        raise HTTPException(status_code=400, detail="Nome destinazione obbligatorio")
+    existing = await db.destinations.find_one(
+        {"name": {"$regex": f"^{re.escape(data.name)}$", "$options": "i"}}, {"_id": 0}
+    )
     if existing:
         raise HTTPException(status_code=400, detail="Destination already exists")
     
@@ -362,6 +424,7 @@ async def create_destination(data: DestinationCreate, current_user: dict = Depen
     
     await db.destinations.insert_one(destination)
     destination.pop("_id", None)
+    await log_event(current_user, "destinazioni", "Destinazione creata", data.name)
     
     return destination
 
@@ -377,13 +440,16 @@ async def update_destination(destination_id: str, data: DestinationCreate, curre
     )
     
     updated = await db.destinations.find_one({"destination_id": destination_id}, {"_id": 0})
+    await log_event(current_user, "destinazioni", "Destinazione modificata", f"{destination.get('name')} -> {data.name}")
     return updated
 
 @api_router.delete("/destinations/{destination_id}")
 async def delete_destination(destination_id: str, current_user: dict = Depends(require_admin)):
+    old = await db.destinations.find_one({"destination_id": destination_id}, {"_id": 0})
     result = await db.destinations.delete_one({"destination_id": destination_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Destination not found")
+    await log_event(current_user, "destinazioni", "Destinazione eliminata", (old or {}).get("name", destination_id))
     return {"message": "Destination deleted successfully"}
 
 # ============== INSTRUMENTS ENDPOINTS ==============
@@ -618,6 +684,7 @@ async def import_confirm(payload: ImportConfirm, current_user: dict = Depends(re
             "created_at": datetime.now(timezone.utc).isoformat(),
         })
         imported += 1
+    await log_event(current_user, "strumenti", "Importazione Excel", f"{imported} strumenti importati, {skipped} saltati")
     return {"imported": imported, "skipped": skipped}
 
 @api_router.get("/instruments/{instrument_id}")
@@ -660,6 +727,7 @@ async def create_instrument(data: InstrumentCreate, current_user: dict = Depends
     
     await db.instruments.insert_one(instrument)
     instrument.pop("_id", None)
+    await log_event(current_user, "strumenti", "Strumento creato", f"{data.name} (matricola {data.matricola})")
     
     return instrument
 
@@ -684,13 +752,17 @@ async def update_instrument(instrument_id: str, data: InstrumentUpdate, current_
         await db.instruments.update_one({"instrument_id": instrument_id}, {"$set": update_data})
     
     updated = await db.instruments.find_one({"instrument_id": instrument_id}, {"_id": 0})
+    changed = ", ".join(sorted(update_data.keys())) or "nessun campo"
+    await log_event(current_user, "strumenti", "Strumento modificato", f"{instrument.get('name')} (matricola {instrument.get('matricola')}) - campi: {changed}")
     return updated
 
 @api_router.delete("/instruments/{instrument_id}")
 async def delete_instrument(instrument_id: str, current_user: dict = Depends(require_admin_or_technician)):
+    old = await db.instruments.find_one({"instrument_id": instrument_id}, {"_id": 0})
     result = await db.instruments.delete_one({"instrument_id": instrument_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Instrument not found")
+    await log_event(current_user, "strumenti", "Strumento eliminato", f"{(old or {}).get('name')} (matricola {(old or {}).get('matricola')})")
     
     await db.movements.delete_many({"instrument_id": instrument_id})
     
@@ -743,6 +815,9 @@ async def create_movement(data: MovementCreate, current_user: dict = Depends(get
     
     await db.movements.insert_one(movement)
     movement.pop("_id", None)
+    label = "Prelievo" if data.movement_type == "prelievo" else "Deposito"
+    where = f" -> {data.destination}" if data.destination else ""
+    await log_event(current_user, "movimenti", label, f"{instrument.get('name')} (matricola {instrument.get('matricola', instrument.get('barcode'))}){where}")
     
     return movement
 
@@ -806,6 +881,8 @@ async def update_user(user_id: str, data: UserUpdate, current_user: dict = Depen
         await db.users.update_one({"user_id": user_id}, {"$set": update_data})
     
     updated = await db.users.find_one({"user_id": user_id}, {"_id": 0, "password_hash": 0, "badge_hash": 0})
+    changes = ", ".join(f"{k}={v}" for k, v in update_data.items()) or "nessuna modifica"
+    await log_event(current_user, "utenti", "Utente modificato", f"{user.get('name')}: {changes}")
     return updated
 
 @api_router.put("/users/{user_id}/badge")
@@ -821,6 +898,7 @@ async def set_user_badge(user_id: str, data: BadgeData, current_user: dict = Dep
     if other:
         raise HTTPException(status_code=400, detail=f"Tessera già assegnata a {other.get('name', 'un altro utente')}")
     await db.users.update_one({"user_id": user_id}, {"$set": {"badge_hash": badge_hash}})
+    await log_event(current_user, "utenti", "Tessera assegnata", f"Utente: {user.get('name')}")
     return {"message": "Tessera assegnata", "has_badge": True}
 
 @api_router.delete("/users/{user_id}/badge")
@@ -828,6 +906,7 @@ async def remove_user_badge(user_id: str, current_user: dict = Depends(require_a
     result = await db.users.update_one({"user_id": user_id}, {"$unset": {"badge_hash": ""}})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="User not found")
+    await log_event(current_user, "utenti", "Tessera rimossa", f"user_id: {user_id}")
     return {"message": "Tessera rimossa", "has_badge": False}
 
 @api_router.delete("/users/{user_id}")
@@ -835,13 +914,110 @@ async def delete_user(user_id: str, current_user: dict = Depends(require_admin))
     if user_id == current_user["user_id"]:
         raise HTTPException(status_code=400, detail="Cannot delete yourself")
     
+    old = await db.users.find_one({"user_id": user_id}, {"_id": 0})
     result = await db.users.delete_one({"user_id": user_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="User not found")
     
     await db.user_sessions.delete_many({"user_id": user_id})
+    await log_event(current_user, "utenti", "Utente eliminato", f"{(old or {}).get('name')} ({(old or {}).get('email')})")
     
     return {"message": "User deleted successfully"}
+
+# ============== NEWS ==============
+
+@api_router.get("/news")
+async def get_news(limit: int = 20, current_user: dict = Depends(get_current_user)):
+    items = await db.news.find({}, {"_id": 0}).sort("created_at", -1).to_list(max(1, min(limit, 100)))
+    return items
+
+@api_router.post("/news")
+async def create_news(data: NewsCreate, current_user: dict = Depends(require_admin_or_technician)):
+    title, body = data.title.strip(), data.body.strip()
+    if not title or not body:
+        raise HTTPException(status_code=400, detail="Titolo e testo sono obbligatori")
+    item = {
+        "news_id": f"news_{uuid.uuid4().hex[:12]}",
+        "title": title[:150],
+        "body": body[:3000],
+        "important": data.important,
+        "author_name": current_user.get("name"),
+        "author_id": current_user.get("user_id"),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.news.insert_one(item)
+    item.pop("_id", None)
+    await log_event(current_user, "news", "News pubblicata", item["title"])
+    return item
+
+@api_router.delete("/news/{news_id}")
+async def delete_news(news_id: str, current_user: dict = Depends(require_admin_or_technician)):
+    old = await db.news.find_one({"news_id": news_id}, {"_id": 0})
+    result = await db.news.delete_one({"news_id": news_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="News non trovata")
+    await log_event(current_user, "news", "News eliminata", (old or {}).get("title", news_id))
+    return {"message": "News eliminata"}
+
+# ============== LOG (solo admin, sola lettura) ==============
+
+def _logs_query(search: Optional[str], category: Optional[str]) -> dict:
+    query = {}
+    if category:
+        query["category"] = category
+    if search:
+        rx = {"$regex": re.escape(search), "$options": "i"}
+        query["$or"] = [{"details": rx}, {"action": rx}, {"user_name": rx}, {"user_email": rx}]
+    return query
+
+@api_router.get("/logs")
+async def get_logs(
+    search: Optional[str] = None,
+    category: Optional[str] = None,
+    limit: int = 100,
+    skip: int = 0,
+    current_user: dict = Depends(require_admin),
+):
+    query = _logs_query(search, category)
+    total = await db.logs.count_documents(query)
+    items = await db.logs.find(query, {"_id": 0}).sort("timestamp", -1).skip(max(skip, 0)).to_list(max(1, min(limit, 500)))
+    return {"items": items, "total": total}
+
+@api_router.get("/logs/export")
+async def export_logs(
+    search: Optional[str] = None,
+    category: Optional[str] = None,
+    current_user: dict = Depends(require_admin),
+):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    from zoneinfo import ZoneInfo
+    rome = ZoneInfo("Europe/Rome")
+    items = await db.logs.find(_logs_query(search, category), {"_id": 0}).sort("timestamp", -1).to_list(20000)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Registro"
+    ws.append(["Data", "Ora", "Utente", "Email", "Categoria", "Azione", "Dettagli"])
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="1E3A8A")
+    for it in items:
+        try:
+            dt = datetime.fromisoformat(it["timestamp"]).astimezone(rome)
+            d, t = dt.strftime("%d/%m/%Y"), dt.strftime("%H:%M:%S")
+        except Exception:
+            d, t = it.get("timestamp", ""), ""
+        ws.append([d, t, it.get("user_name") or "-", it.get("user_email") or "-", it.get("category"), it.get("action"), it.get("details")])
+    for col, w in zip("ABCDEFG", [12, 10, 24, 30, 14, 26, 70]):
+        ws.column_dimensions[col].width = w
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    await log_event(current_user, "registro", "Esportazione registro", f"{len(items)} righe")
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="registro_attivita.xlsx"'},
+    )
 
 # ============== STATS ENDPOINT ==============
 
@@ -884,6 +1060,27 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.on_event("startup")
+async def seed_school_rooms():
+    """Aggiunge una sola volta l'elenco delle aule del Malignani tra le destinazioni."""
+    try:
+        if await db.meta.find_one({"key": "rooms_seeded_v1"}):
+            return
+        existing = set()
+        async for d in db.destinations.find({}, {"_id": 0, "name": 1}):
+            existing.add((d.get("name") or "").strip().lower())
+        now = datetime.now(timezone.utc).isoformat()
+        docs = [
+            {"destination_id": f"dest_{uuid.uuid4().hex[:12]}", "name": r, "description": None, "created_at": now}
+            for r in SCHOOL_ROOMS if r.strip().lower() not in existing
+        ]
+        if docs:
+            await db.destinations.insert_many(docs)
+        await db.meta.insert_one({"key": "rooms_seeded_v1", "at": now, "added": len(docs)})
+        logger.info("Aule aggiunte come destinazioni: %s", len(docs))
+    except Exception:
+        logger.exception("Impossibile aggiungere le aule")
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
