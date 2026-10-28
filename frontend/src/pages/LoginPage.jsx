@@ -4,7 +4,7 @@ import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
-import { Eye, EyeOff, LogIn, CreditCard } from "lucide-react";
+import { Eye, EyeOff, LogIn, CreditCard, Megaphone } from "lucide-react";
 import { API } from "../App";
 
 const SCHOOL_LOGO = "https://customer-assets.emergentagent.com/job_lab-inventory-13/artifacts/qkvfmo8i_cropped-MALIGNANI_logo-ISIS-pittogramma.png";
@@ -18,6 +18,15 @@ export default function LoginPage({ login }) {
   const [loading, setLoading] = useState(false);
 
   const [badgeMessage, setBadgeMessage] = useState("");
+  const [news, setNews] = useState([]);
+
+  // News pubbliche: si vedono anche prima di fare il login
+  useEffect(() => {
+    fetch(`${API}/news/public?limit=3`)
+      .then((r) => (r.ok ? r.json() : []))
+      .then((data) => setNews(Array.isArray(data) ? data : []))
+      .catch(() => {});
+  }, []);
   const loginRef = useRef(login);
   useEffect(() => {
     loginRef.current = login;
@@ -274,6 +283,29 @@ export default function LoginPage({ login }) {
               </p>
             </CardContent>
           </Card>
+
+          {news.length > 0 && (
+            <div className="mt-8" data-testid="login-news">
+              <p className="flex items-center gap-2 text-sm font-medium text-slate-700 mb-3">
+                <Megaphone size={16} className="text-blue-600" />
+                News dal laboratorio
+              </p>
+              <div className="space-y-3 max-h-72 overflow-y-auto pr-1">
+                {news.map((item) => (
+                  <div
+                    key={item.news_id}
+                    className={`p-3 rounded-lg border text-sm ${item.important ? "bg-amber-50 border-amber-200" : "bg-slate-50 border-slate-200"}`}
+                  >
+                    <p className="font-medium text-slate-900">{item.title}</p>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      {new Date(item.created_at).toLocaleDateString("it-IT")}
+                    </p>
+                    <p className="text-slate-700 mt-1.5 whitespace-pre-wrap">{item.body}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>
