@@ -17,6 +17,9 @@ import io
 import re
 import hmac
 import hashlib
+import base64
+import zipfile
+import xml.etree.ElementTree as ET
 import asyncio
 from zoneinfo import ZoneInfo
 from zoneinfo import ZoneInfo
@@ -774,6 +777,7 @@ async def delete_instrument(instrument_id: str, current_user: dict = Depends(req
     result = await db.instruments.delete_one({"instrument_id": instrument_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Instrument not found")
+    await db.instrument_images.delete_many({"instrument_id": instrument_id})
     await log_event(current_user, "strumenti", "Strumento eliminato", f"{(old or {}).get('name')} (matricola {(old or {}).get('matricola')})")
     
     await db.movements.delete_many({"instrument_id": instrument_id})
@@ -1305,6 +1309,302 @@ async def lab_access_delete(access_id: str, current_user: dict = Depends(require
     await log_event(current_user, "laboratorio", "Riga registro accessi eliminata",
                     f"{(old or {}).get('cognome')} {(old or {}).get('nome')} del {(old or {}).get('entry_time', '')[:10]}")
     return {"message": "Riga eliminata"}
+
+# ============== FOTO STRUMENTI DA EXCEL ==============
+
+MAX_IMAGE_BYTES = 8 * 1024 * 1024   # per singola foto
+MAX_XLSX_BYTES = 40 * 1024 * 1024   # per file Excel
+
+def _process_image(raw: bytes):
+    """Ridimensiona e comprime la foto (JPEG, max 900 px). Ritorna (jpeg, miniatura base64)."""
+    from PIL import Image, ImageOps
+    Image.MAX_IMAGE_PIXELS = 50_000_000
+    if len(raw) > MAX_IMAGE_BYTES:
+        raise ValueError("Foto troppo pesante (massimo 8 MB)")
+    img = Image.open(io.BytesIO(raw))
+    img = ImageOps.exif_transpose(img)
+    if img.mode in ("RGBA", "LA", "P"):
+        img = img.convert("RGBA")
+        background = Image.new("RGB", img.size, (255, 255, 255))
+        background.paste(img, mask=img.split()[-1])
+        img = background
+    else:
+        img = img.convert("RGB")
+    img.thumbnail((900, 900))
+    out = io.BytesIO()
+    img.save(out, "JPEG", quality=82, optimize=True)
+    thumb = img.copy()
+    thumb.thumbnail((72, 72))
+    tout = io.BytesIO()
+    thumb.save(tout, "JPEG", quality=70)
+    return out.getvalue(), "data:image/jpeg;base64," + base64.b64encode(tout.getvalue()).decode("ascii")
+
+def _local(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+def _cell_ref_row(ref: str) -> int:
+    return int(re.sub(r"[A-Za-z]+", "", ref))
+
+def _extract_in_cell_images(content: bytes) -> dict:
+    """Foto inserite 'nella cella' (Excel 365): ritorna {numero riga: bytes}. Se non ce ne sono, {}."""
+    result = {}
+    try:
+        z = zipfile.ZipFile(io.BytesIO(content))
+        names = set(z.namelist())
+        needed = ["xl/metadata.xml", "xl/richData/rdrichvalue.xml", "xl/richData/richValueRel.xml",
+                  "xl/richData/_rels/richValueRel.xml.rels"]
+        if not all(n in names for n in needed):
+            return {}
+
+        # struttura dei valori ricchi: in che posizione c'è l'indice dell'immagine
+        key_pos = {}
+        if "xl/richData/rdrichvaluestructure.xml" in names:
+            structs = [e for e in ET.fromstring(z.read("xl/richData/rdrichvaluestructure.xml")) if _local(e.tag) == "s"]
+            for si, st in enumerate(structs):
+                for ki, k in enumerate([c for c in st if _local(c.tag) == "k"]):
+                    if k.get("n") == "_rvRel:LocalImageIdentifier":
+                        key_pos[si] = ki
+
+        rich_values = [e for e in ET.fromstring(z.read("xl/richData/rdrichvalue.xml")) if _local(e.tag) == "rv"]
+        rels_root = ET.fromstring(z.read("xl/richData/richValueRel.xml"))
+        rel_ids = [e.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id")
+                   for e in rels_root if _local(e.tag) == "rel"]
+        rel_targets = {}
+        for r in ET.fromstring(z.read("xl/richData/_rels/richValueRel.xml.rels")):
+            target = r.get("Target", "")
+            target = target.lstrip("/")
+            if target.startswith("../"):
+                target = "xl/" + target[3:]
+            elif not target.startswith("xl/"):
+                target = "xl/richData/" + target
+            rel_targets[r.get("Id")] = target
+
+        meta = ET.fromstring(z.read("xl/metadata.xml"))
+        future_rvb = []   # indice del valore ricco per ogni bk di futureMetadata
+        value_meta = []   # indice del bk di futureMetadata per ogni valueMetadata (1-based nel foglio)
+        for e in meta:
+            if _local(e.tag) == "futureMetadata":
+                for bk in e:
+                    i = None
+                    for x in bk.iter():
+                        if _local(x.tag) == "rvb":
+                            i = int(x.get("i"))
+                    future_rvb.append(i)
+            elif _local(e.tag) == "valueMetadata":
+                for bk in e:
+                    rc = [x for x in bk if _local(x.tag) == "rc"]
+                    value_meta.append(int(rc[0].get("v")) if rc else None)
+
+        # primo foglio della cartella di lavoro
+        wb_xml = ET.fromstring(z.read("xl/workbook.xml"))
+        first_sheet = [e for e in wb_xml.iter() if _local(e.tag) == "sheet"][0]
+        rid = first_sheet.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id")
+        sheet_path = None
+        for r in ET.fromstring(z.read("xl/_rels/workbook.xml.rels")):
+            if r.get("Id") == rid:
+                t = r.get("Target", "").lstrip("/")
+                sheet_path = t if t.startswith("xl/") else "xl/" + t
+        if not sheet_path or sheet_path not in names:
+            return {}
+
+        for c in ET.fromstring(z.read(sheet_path)).iter():
+            if _local(c.tag) != "c" or c.get("vm") is None:
+                continue
+            vm = int(c.get("vm")) - 1
+            if vm < 0 or vm >= len(value_meta) or value_meta[vm] is None:
+                continue
+            fi = value_meta[vm]
+            if fi >= len(future_rvb) or future_rvb[fi] is None or future_rvb[fi] >= len(rich_values):
+                continue
+            rv = rich_values[future_rvb[fi]]
+            vals = [v for v in rv if _local(v.tag) == "v"]
+            pos = key_pos.get(int(rv.get("s", "0")), 0)
+            img_index = int(vals[pos].text)
+            if img_index >= len(rel_ids) or rel_ids[img_index] not in rel_targets:
+                continue
+            target = rel_targets[rel_ids[img_index]]
+            if target in names:
+                result.setdefault(_cell_ref_row(c.get("r")), z.read(target))
+    except Exception:
+        logger.exception("Lettura foto nelle celle non riuscita")
+        return {}
+    return result
+
+def _parse_image_sheet(content: bytes) -> list:
+    """Legge l'Excel delle foto: una riga per strumento (colonna Matricola) con foto incollata o URL."""
+    from openpyxl import load_workbook
+    if len(content) > MAX_XLSX_BYTES:
+        raise HTTPException(status_code=400, detail="File troppo grande (massimo 40 MB)")
+    try:
+        wb = load_workbook(io.BytesIO(content), data_only=True)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Il file non è un Excel valido (.xlsx)")
+    ws = wb.worksheets[0]
+
+    col_matricola = col_url = None
+    header = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None) or ()
+    for idx, title in enumerate(header):
+        t = (str(title).strip().lower() if title is not None else "")
+        if t in ("matricola", "seriale", "numero di serie") and col_matricola is None:
+            col_matricola = idx
+        if t.startswith("url") and col_url is None:
+            col_url = idx
+    if col_matricola is None:
+        raise HTTPException(status_code=400, detail="Colonna obbligatoria mancante: Matricola")
+
+    # foto "sopra le celle": agganciate alla riga in cui si trova l'angolo in alto a sinistra
+    floating = {}
+    for img in getattr(ws, "_images", []):
+        try:
+            row = img.anchor._from.row + 1
+            col = img.anchor._from.col
+            if row not in floating or col < floating[row][0]:
+                floating[row] = (col, img._data())
+        except Exception:
+            continue
+    in_cell = _extract_in_cell_images(content)
+
+    rows = []
+    for row_number, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+        matricola = _cell_to_text(row[col_matricola]) if col_matricola < len(row) else None
+        url = _cell_to_text(row[col_url]) if col_url is not None and col_url < len(row) else None
+        raw = floating[row_number][1] if row_number in floating else in_cell.get(row_number)
+        if not matricola and not raw and not url:
+            continue
+        if len(rows) >= 2000:
+            raise HTTPException(status_code=400, detail="Troppe righe (massimo 2000)")
+        rows.append({"row": row_number, "matricola": matricola, "raw": raw, "url": url})
+    wb.close()
+    return rows
+
+async def _evaluate_image_rows(rows: list) -> list:
+    """Per ogni riga: controlla matricola, foto e miniatura. Non salva nulla."""
+    matricole = [r["matricola"] for r in rows if r["matricola"]]
+    found = {}
+    if matricole:
+        async for doc in db.instruments.find({"matricola": {"$in": matricole}}, {"_id": 0, "instrument_id": 1, "matricola": 1, "name": 1, "image_url": 1}):
+            found[doc["matricola"]] = doc
+    results, seen = [], set()
+    for r in rows:
+        item = {"row": r["row"], "matricola": r["matricola"], "name": None, "status": "ok", "message": "",
+                "source": None, "thumb": None, "replaces": False}
+        inst = found.get(r["matricola"]) if r["matricola"] else None
+        if not r["matricola"]:
+            item.update(status="error", message="Matricola mancante")
+        elif not inst:
+            item.update(status="not_found", message="Matricola non presente tra gli strumenti")
+        elif r["matricola"] in seen:
+            item.update(status="error", message="Matricola ripetuta nel file", name=inst.get("name"))
+        elif not r["raw"] and not r["url"]:
+            item.update(status="no_image", message="Nessuna foto in questa riga", name=inst.get("name"))
+        else:
+            item["name"] = inst.get("name")
+            item["replaces"] = bool(inst.get("image_url"))
+            if r["raw"]:
+                try:
+                    _, thumb = _process_image(r["raw"])
+                    item.update(source="foto", thumb=thumb)
+                except Exception as e:
+                    item.update(status="error", message=f"Foto non leggibile: {e}")
+            else:
+                if re.match(r"^https?://", r["url"], re.I):
+                    item.update(source="url", thumb=r["url"])
+                else:
+                    item.update(status="error", message="L'URL deve iniziare con http:// o https://")
+            if item["status"] == "ok":
+                seen.add(r["matricola"])
+        results.append(item)
+    return results
+
+@api_router.get("/instruments/import-images/template")
+async def import_images_template(current_user: dict = Depends(require_admin_or_technician)):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Foto strumenti"
+    ws.append(["Matricola", "Foto", "URL immagine (alternativa alla foto)", "Nome strumento (solo per orientarti)"])
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="1E3A8A")
+        cell.alignment = Alignment(wrap_text=True, vertical="center")
+    instruments = await db.instruments.find({}, {"_id": 0, "matricola": 1, "name": 1}).sort("name", 1).to_list(5000)
+    for it in instruments:
+        ws.append([it.get("matricola"), None, None, it.get("name")])
+    for i in range(2, len(instruments) + 2):
+        ws.row_dimensions[i].height = 90
+        ws[f"A{i}"].number_format = "@"
+        ws[f"A{i}"].alignment = Alignment(vertical="center")
+        ws[f"D{i}"].alignment = Alignment(vertical="center", wrap_text=True)
+    for col, w in zip("ABCD", [18, 22, 40, 36]):
+        ws.column_dimensions[col].width = w
+    ws.row_dimensions[1].height = 32
+    ws.freeze_panes = "A2"
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="modello_foto_strumenti.xlsx"'},
+    )
+
+@api_router.post("/instruments/import-images/preview")
+async def import_images_preview(file: UploadFile = File(...), current_user: dict = Depends(require_admin_or_technician)):
+    rows = _parse_image_sheet(await file.read())
+    results = await _evaluate_image_rows(rows)
+    counts = {k: sum(1 for r in results if r["status"] == k) for k in ("ok", "not_found", "no_image", "error")}
+    return {"rows": results, "counts": counts}
+
+@api_router.post("/instruments/import-images/confirm")
+async def import_images_confirm(file: UploadFile = File(...), current_user: dict = Depends(require_admin_or_technician)):
+    rows = _parse_image_sheet(await file.read())
+    results = await _evaluate_image_rows(rows)
+    by_row = {r["row"]: r for r in rows}
+    imported, failed = 0, 0
+    for res in results:
+        if res["status"] != "ok":
+            continue
+        src = by_row[res["row"]]
+        inst = await db.instruments.find_one({"matricola": res["matricola"]}, {"_id": 0, "instrument_id": 1})
+        if not inst:
+            failed += 1
+            continue
+        try:
+            if src["raw"]:
+                jpeg, _ = _process_image(src["raw"])
+                image_id = f"img_{uuid.uuid4().hex[:24]}"
+                await db.instrument_images.delete_many({"instrument_id": inst["instrument_id"]})
+                await db.instrument_images.insert_one({
+                    "image_id": image_id,
+                    "instrument_id": inst["instrument_id"],
+                    "matricola": res["matricola"],
+                    "content_type": "image/jpeg",
+                    "data": jpeg,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                })
+                image_url = f"/api/images/{image_id}"
+            else:
+                await db.instrument_images.delete_many({"instrument_id": inst["instrument_id"]})
+                image_url = src["url"]
+            await db.instruments.update_one({"instrument_id": inst["instrument_id"]}, {"$set": {"image_url": image_url}})
+            imported += 1
+        except Exception:
+            logger.exception("Importazione foto fallita per %s", res["matricola"])
+            failed += 1
+    await log_event(current_user, "strumenti", "Importazione foto da Excel", f"{imported} foto importate, {failed} non riuscite")
+    return {"imported": imported, "failed": failed}
+
+@api_router.get("/images/{image_id}")
+async def get_image(image_id: str):
+    """Foto dello strumento. L'indirizzo contiene un codice casuale non indovinabile."""
+    doc = await db.instrument_images.find_one({"image_id": image_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Immagine non trovata")
+    return Response(
+        content=bytes(doc["data"]),
+        media_type=doc.get("content_type", "image/jpeg"),
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 # ============== NEWS ==============
 
