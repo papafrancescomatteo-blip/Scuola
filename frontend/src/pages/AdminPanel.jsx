@@ -38,6 +38,7 @@ import {
 import Sidebar from "../components/Sidebar";
 import NewsManager from "../components/NewsManager";
 import LogsViewer from "../components/LogsViewer";
+import ImageImportDialog from "../components/ImageImportDialog";
 import { 
   Plus, 
   Pencil, 
@@ -56,7 +57,8 @@ import {
   AlertTriangle,
   CreditCard,
   Megaphone,
-  ScrollText
+  ScrollText,
+  ImageIcon
 } from "lucide-react";
 import { API } from "../App";
 
@@ -90,6 +92,9 @@ export default function AdminPanel({ user, token, logout }) {
   const [badgeLoading, setBadgeLoading] = useState(false);
   const [badgeError, setBadgeError] = useState("");
   const [badgeDone, setBadgeDone] = useState("");
+
+  // Importazione foto da Excel
+  const [showImageImport, setShowImageImport] = useState(false);
 
   // Excel Import State
   const [showImportDialog, setShowImportDialog] = useState(false);
@@ -620,6 +625,14 @@ export default function AdminPanel({ user, token, logout }) {
                         <FileSpreadsheet size={18} className="mr-2" />
                         Importa da Excel
                       </Button>
+                      <Button
+                        variant="outline"
+                        onClick={() => setShowImageImport(true)}
+                        data-testid="import-images-btn"
+                      >
+                        <ImageIcon size={18} className="mr-2" />
+                        Importa foto
+                      </Button>
                       <Button 
                         onClick={openNewInstrument}
                         className="bg-blue-600 hover:bg-blue-700 btn-animate"
@@ -1115,6 +1128,13 @@ export default function AdminPanel({ user, token, logout }) {
             </DialogFooter>
           </DialogContent>
         </Dialog>
+
+        <ImageImportDialog
+          open={showImageImport}
+          onOpenChange={setShowImageImport}
+          token={token}
+          onDone={fetchData}
+        />
 
         {/* Excel Import Dialog */}
         <Dialog open={showImportDialog} onOpenChange={setShowImportDialog}>

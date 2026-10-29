@@ -29,7 +29,7 @@ import {
   Hash,
   Barcode
 } from "lucide-react";
-import { API } from "../App";
+import { API, resolveImage } from "../App";
 
 export default function InstrumentDetail({ user, token, logout }) {
   const { id } = useParams();
@@ -248,7 +248,7 @@ export default function InstrumentDetail({ user, token, logout }) {
                 <CardContent className="pt-6">
                   {instrument.image_url ? (
                     <img 
-                      src={instrument.image_url} 
+                      src={resolveImage(instrument.image_url)} 
                       alt={instrument.name}
                       className="w-full h-64 object-cover rounded-lg"
                     />
