@@ -18,6 +18,10 @@ const BACKEND_URL = configuredBackendUrl
   : "";
 export const API = `${BACKEND_URL}/api`;
 
+// Le foto caricate da Excel sono salvate dall'API con un indirizzo tipo /api/images/...:
+// qui lo trasformiamo nell'indirizzo completo dell'API. Gli indirizzi web restano invariati.
+export const resolveImage = (url) => (url && url.startsWith("/api/") ? `${BACKEND_URL}${url}` : url);
+
 // Auth Context
 export const useAuth = () => {
   const [user, setUser] = useState(null);
