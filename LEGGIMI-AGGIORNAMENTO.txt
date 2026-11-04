@@ -1,0 +1,14 @@
+AGGIORNAMENTO - Filamenti, famiglie, marca, menu sempre visibile
+
+Novita':
+1) Pagina "Filamenti 3D" (menu a sinistra): magazzino filamenti Bambu Lab con bobine chiuse/aperte,
+   grammi rimasti, scorta minima, lista "Da riordinare" e export Excel.
+2) Menu laterale fisso: "Esci" e "Ingresso/Uscita laboratorio" sono sempre visibili, senza scorrere.
+   Home piu' ordinata: news ridotte, statistiche compatte, elenco a pagine (15 per volta).
+3) Famiglie di strumenti (es. Micrometri): bottoni in Dashboard per filtrare; si assegnano da
+   Amministrazione > Strumenti selezionando piu' strumenti e premendo "Assegna famiglia".
+4) Campo Marca (e Famiglia) su ogni strumento: nel modulo "Nuovo strumento", nell'Excel generale
+   (colonne Marca e Famiglia) e nell'Excel delle foto (colonna Marca, anche senza foto).
+
+Come aggiornare: copia i file di questo zip nella cartella del progetto (sovrascrivi), poi con
+GitHub Desktop: Commit + Push. Render ricostruisce da solo. Nessuna nuova variabile da impostare.

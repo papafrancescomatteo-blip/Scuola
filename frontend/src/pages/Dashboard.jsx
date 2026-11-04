@@ -20,7 +20,7 @@ import {
   SelectValue,
 } from "../components/ui/select";
 import Sidebar from "../components/Sidebar";
-import { Search, Package, CheckCircle, Clock, Users, Activity, Barcode, Megaphone } from "lucide-react";
+import { Search, Package, CheckCircle, Clock, Activity, Barcode, Megaphone, ChevronLeft, ChevronRight, Layers } from "lucide-react";
 import { API } from "../App";
 
 export default function Dashboard({ user, token, logout }) {
@@ -33,6 +33,11 @@ export default function Dashboard({ user, token, logout }) {
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [categories, setCategories] = useState([]);
   const [news, setNews] = useState([]);
+  const [showAllNews, setShowAllNews] = useState(false);
+  const [families, setFamilies] = useState({ families: [], without_family: 0 });
+  const [familyFilter, setFamilyFilter] = useState("all");
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 15;
 
   const fetchData = async () => {
     try {
@@ -41,6 +46,11 @@ export default function Dashboard({ user, token, logout }) {
       fetch(`${API}/news?limit=5`, { headers, credentials: "include" })
         .then((r) => (r.ok ? r.json() : []))
         .then(setNews)
+        .catch(() => {});
+
+      fetch(`${API}/families`, { headers, credentials: "include" })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => d && setFamilies(d))
         .catch(() => {});
 
       const [instrumentsRes, statsRes, categoriesRes] = await Promise.all([
@@ -75,16 +85,29 @@ export default function Dashboard({ user, token, logout }) {
   }, [token]);
 
   const filteredInstruments = instruments.filter((inst) => {
-    const matchesSearch = 
-      inst.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      inst.barcode?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      inst.description?.toLowerCase().includes(searchQuery.toLowerCase());
+    const q = searchQuery.toLowerCase();
+    const matchesSearch =
+      !q ||
+      inst.name?.toLowerCase().includes(q) ||
+      inst.barcode?.toLowerCase().includes(q) ||
+      inst.matricola?.toLowerCase().includes(q) ||
+      inst.brand?.toLowerCase().includes(q) ||
+      inst.family?.toLowerCase().includes(q) ||
+      inst.description?.toLowerCase().includes(q);
+    const matchesFamily =
+      familyFilter === "all" ||
+      (familyFilter === "__none" ? !inst.family : inst.family === familyFilter);
     
     const matchesStatus = statusFilter === "all" || inst.status === statusFilter;
     const matchesCategory = categoryFilter === "all" || inst.category === categoryFilter;
     
-    return matchesSearch && matchesStatus && matchesCategory;
+    return matchesSearch && matchesStatus && matchesCategory && matchesFamily;
   });
+
+  const totalPages = Math.max(1, Math.ceil(filteredInstruments.length / PAGE_SIZE));
+  const currentPage = Math.min(page, totalPages);
+  const pagedInstruments = filteredInstruments.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
+  useEffect(() => { setPage(1); }, [searchQuery, statusFilter, categoryFilter, familyFilter]);
 
   const getStatusBadge = (status) => {
     switch (status) {
@@ -120,7 +143,7 @@ export default function Dashboard({ user, token, logout }) {
       <main className="main-content">
         <div className="p-6 md:p-8">
           {/* Header */}
-          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-8">
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-6">
             <div>
               <h1 className="text-3xl font-semibold text-slate-900" style={{ fontFamily: 'Work Sans' }}>
                 Dashboard
@@ -141,7 +164,7 @@ export default function Dashboard({ user, token, logout }) {
 
           {/* News */}
           {news.length > 0 && (
-            <Card className="mb-8" data-testid="news-section">
+            <Card className="mb-6" data-testid="news-section">
               <CardHeader className="pb-3">
                 <CardTitle className="text-lg" style={{ fontFamily: 'Work Sans' }}>
                   <Megaphone className="inline mr-2 h-5 w-5 text-blue-600" />
@@ -149,7 +172,7 @@ export default function Dashboard({ user, token, logout }) {
                 </CardTitle>
               </CardHeader>
               <CardContent className="space-y-3">
-                {news.map((item) => (
+                {(showAllNews ? news : news.slice(0, 2)).map((item) => (
                   <div
                     key={item.news_id}
                     className={`p-4 rounded-lg border ${item.important ? "bg-amber-50 border-amber-200" : "bg-slate-50 border-slate-200"}`}
@@ -166,76 +189,64 @@ export default function Dashboard({ user, token, logout }) {
                     <p className="text-sm text-slate-700 mt-2 whitespace-pre-wrap">{item.body}</p>
                   </div>
                 ))}
+                {news.length > 2 && (
+                  <Button variant="ghost" size="sm" onClick={() => setShowAllNews(!showAllNews)} data-testid="toggle-news-btn">
+                    {showAllNews ? "Mostra meno" : `Mostra tutte le news (${news.length})`}
+                  </Button>
+                )}
               </CardContent>
             </Card>
           )}
 
           {/* Stats Grid */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-            <Card className="card-hover" data-testid="stat-total-instruments">
-              <CardContent className="pt-6">
-                <div className="flex items-center gap-4">
-                  <div className="p-3 rounded-lg bg-blue-100">
-                    <Package className="h-6 w-6 text-blue-600" />
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
+            {[
+              { id: "stat-total-instruments", label: "Totale strumenti", value: stats.total_instruments, icon: Package, bg: "bg-blue-100", fg: "text-blue-600", num: "text-slate-900" },
+              { id: "stat-available", label: "Disponibili", value: stats.available, icon: CheckCircle, bg: "bg-emerald-100", fg: "text-emerald-600", num: "text-emerald-600" },
+              { id: "stat-in-use", label: "In uso", value: stats.in_use, icon: Clock, bg: "bg-amber-100", fg: "text-amber-600", num: "text-amber-600" },
+              { id: "stat-movements", label: "Movimenti", value: stats.total_movements, icon: Activity, bg: "bg-purple-100", fg: "text-purple-600", num: "text-slate-900" },
+            ].map((c) => (
+              <Card key={c.id} data-testid={c.id}>
+                <CardContent className="p-4 flex items-center gap-3">
+                  <div className={`p-2 rounded-lg ${c.bg}`}>
+                    <c.icon className={`h-5 w-5 ${c.fg}`} />
                   </div>
-                  <div>
-                    <p className="text-sm text-slate-500">Totale Strumenti</p>
-                    <p className="text-2xl font-semibold text-slate-900">
-                      {stats.total_instruments || 0}
-                    </p>
+                  <div className="min-w-0">
+                    <p className="text-xs text-slate-500 truncate">{c.label}</p>
+                    <p className={`text-xl font-semibold leading-tight ${c.num}`}>{c.value || 0}</p>
                   </div>
-                </div>
-              </CardContent>
-            </Card>
-
-            <Card className="card-hover" data-testid="stat-available">
-              <CardContent className="pt-6">
-                <div className="flex items-center gap-4">
-                  <div className="p-3 rounded-lg bg-emerald-100">
-                    <CheckCircle className="h-6 w-6 text-emerald-600" />
-                  </div>
-                  <div>
-                    <p className="text-sm text-slate-500">Disponibili</p>
-                    <p className="text-2xl font-semibold text-emerald-600">
-                      {stats.available || 0}
-                    </p>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-
-            <Card className="card-hover" data-testid="stat-in-use">
-              <CardContent className="pt-6">
-                <div className="flex items-center gap-4">
-                  <div className="p-3 rounded-lg bg-amber-100">
-                    <Clock className="h-6 w-6 text-amber-600" />
-                  </div>
-                  <div>
-                    <p className="text-sm text-slate-500">In Uso</p>
-                    <p className="text-2xl font-semibold text-amber-600">
-                      {stats.in_use || 0}
-                    </p>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-
-            <Card className="card-hover" data-testid="stat-movements">
-              <CardContent className="pt-6">
-                <div className="flex items-center gap-4">
-                  <div className="p-3 rounded-lg bg-purple-100">
-                    <Activity className="h-6 w-6 text-purple-600" />
-                  </div>
-                  <div>
-                    <p className="text-sm text-slate-500">Movimenti</p>
-                    <p className="text-2xl font-semibold text-slate-900">
-                      {stats.total_movements || 0}
-                    </p>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
+                </CardContent>
+              </Card>
+            ))}
           </div>
+
+          {/* Famiglie */}
+          {families.families.length > 0 && (
+            <div className="mb-4" data-testid="families-bar">
+              <div className="flex items-center gap-2 text-sm text-slate-500 mb-2">
+                <Layers size={16} /> Famiglie di strumenti
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {[{ key: "all", label: "Tutte", count: stats.total_instruments ?? instruments.length },
+                  ...families.families.map((f) => ({ key: f.name, label: f.name, count: f.count })),
+                  ...(families.without_family > 0 ? [{ key: "__none", label: "Senza famiglia", count: families.without_family }] : []),
+                ].map((f) => (
+                  <button
+                    key={f.key}
+                    onClick={() => setFamilyFilter(f.key)}
+                    className={`px-3 py-1.5 rounded-full text-sm border transition-colors ${
+                      familyFilter === f.key
+                        ? "bg-blue-600 text-white border-blue-600"
+                        : "bg-white text-slate-700 border-slate-200 hover:border-blue-300 hover:bg-blue-50"
+                    }`}
+                    data-testid={`family-chip-${f.key}`}
+                  >
+                    {f.label} <span className={familyFilter === f.key ? "text-blue-100" : "text-slate-400"}>({f.count})</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Instruments Table */}
           <Card data-testid="instruments-table-card">
@@ -247,7 +258,7 @@ export default function Dashboard({ user, token, logout }) {
                   <div className="relative">
                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
                     <Input
-                      placeholder="Cerca strumenti..."
+                      placeholder="Cerca nome, matricola, marca..."
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
                       className="pl-9 w-full sm:w-64"
@@ -298,7 +309,7 @@ export default function Dashboard({ user, token, logout }) {
                     Nessuno strumento trovato
                   </h3>
                   <p className="text-slate-500">
-                    {searchQuery || statusFilter !== "all" || categoryFilter !== "all"
+                    {searchQuery || statusFilter !== "all" || categoryFilter !== "all" || familyFilter !== "all"
                       ? "Prova a modificare i filtri di ricerca"
                       : "Aggiungi il primo strumento dal pannello admin"}
                   </p>
@@ -311,13 +322,14 @@ export default function Dashboard({ user, token, logout }) {
                         <TableHead>Codice</TableHead>
                         <TableHead>Matricola</TableHead>
                         <TableHead>Nome</TableHead>
-                        <TableHead className="hidden md:table-cell">Categoria</TableHead>
+                        <TableHead className="hidden md:table-cell">Marca</TableHead>
+                        <TableHead className="hidden lg:table-cell">Famiglia</TableHead>
                         <TableHead>Stato</TableHead>
                         <TableHead className="text-right">Azioni</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {filteredInstruments.map((instrument) => (
+                      {pagedInstruments.map((instrument) => (
                         <TableRow 
                           key={instrument.instrument_id}
                           className="table-row-hover cursor-pointer"
@@ -334,7 +346,10 @@ export default function Dashboard({ user, token, logout }) {
                             {instrument.name}
                           </TableCell>
                           <TableCell className="hidden md:table-cell text-slate-500">
-                            {instrument.category || "-"}
+                            {instrument.brand || "-"}
+                          </TableCell>
+                          <TableCell className="hidden lg:table-cell text-slate-500">
+                            {instrument.family || "-"}
                           </TableCell>
                           <TableCell>
                             {getStatusBadge(instrument.status)}
@@ -356,6 +371,22 @@ export default function Dashboard({ user, token, logout }) {
                       ))}
                     </TableBody>
                   </Table>
+                </div>
+              )}
+              {!loading && filteredInstruments.length > PAGE_SIZE && (
+                <div className="flex items-center justify-between pt-4 text-sm text-slate-500" data-testid="pagination">
+                  <span>
+                    {(currentPage - 1) * PAGE_SIZE + 1}–{Math.min(currentPage * PAGE_SIZE, filteredInstruments.length)} di {filteredInstruments.length}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <Button variant="outline" size="sm" disabled={currentPage <= 1} onClick={() => setPage(currentPage - 1)} data-testid="page-prev">
+                      <ChevronLeft size={16} />
+                    </Button>
+                    <span>Pagina {currentPage} / {totalPages}</span>
+                    <Button variant="outline" size="sm" disabled={currentPage >= totalPages} onClick={() => setPage(currentPage + 1)} data-testid="page-next">
+                      <ChevronRight size={16} />
+                    </Button>
+                  </div>
                 </div>
               )}
             </CardContent>

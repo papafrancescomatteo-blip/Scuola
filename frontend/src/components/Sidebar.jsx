@@ -14,7 +14,8 @@ import {
   ChevronRight,
   DoorOpen,
   DoorClosed,
-  ClipboardCheck
+  ClipboardCheck,
+  Printer
 } from "lucide-react";
 
 const SCHOOL_LOGO = "https://customer-assets.emergentagent.com/job_lab-inventory-13/artifacts/qkvfmo8i_cropped-MALIGNANI_logo-ISIS-pittogramma.png";
@@ -107,6 +108,12 @@ export default function Sidebar({ user, logout, activePage }) {
       label: "Ricerca", 
       icon: Barcode, 
       path: "/search" 
+    },
+    { 
+      id: "filamenti", 
+      label: "Filamenti 3D", 
+      icon: Printer, 
+      path: "/filamenti" 
     }
   ];
 
@@ -147,7 +154,7 @@ export default function Sidebar({ user, logout, activePage }) {
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 p-3 space-y-1">
+      <nav className="flex-1 min-h-0 overflow-y-auto p-3 space-y-1">
         {navItems.map((item) => (
           <Link
             key={item.id}
@@ -167,14 +174,14 @@ export default function Sidebar({ user, logout, activePage }) {
       </nav>
 
       {/* User section */}
-      <div className="p-4 border-t border-slate-700">
+      <div className="p-3 border-t border-slate-700 shrink-0">
         {!collapsed && (
-          <div className="flex items-center gap-3 mb-4">
+          <div className="flex items-center gap-3 mb-3">
             {user?.picture ? (
               <img 
                 src={user.picture} 
                 alt={user.name}
-                className="w-10 h-10 rounded-full"
+                className="w-9 h-9 rounded-full"
               />
             ) : (
               <div className="w-10 h-10 rounded-full bg-slate-600 flex items-center justify-center text-white font-medium">
@@ -251,7 +258,7 @@ export default function Sidebar({ user, logout, activePage }) {
 
       {/* Sidebar */}
       <aside 
-        className={`sidebar ${collapsed ? 'sidebar-collapsed' : ''} ${mobileOpen ? 'open' : ''} relative`}
+        className={`sidebar ${collapsed ? 'sidebar-collapsed' : ''} ${mobileOpen ? 'open' : ''}`}
         data-testid="sidebar"
       >
         <NavContent />

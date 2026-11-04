@@ -95,7 +95,8 @@ export default function ImageImportDialog({ open, onOpenChange, token, onDone })
 
   const statusCell = (r) => {
     if (r.status === "ok") {
-      return <span className="text-green-700">{r.replaces ? "Sostituisce la foto attuale" : "Nuova foto"}</span>;
+      if (r.source === "marca") return <span className="text-green-700">Solo marca: {r.brand}</span>;
+      return <span className="text-green-700">{r.replaces ? "Sostituisce la foto attuale" : "Nuova foto"}{r.brand ? ` · marca: ${r.brand}` : ""}</span>;
     }
     return <span className={r.status === "no_image" ? "text-slate-500" : "text-red-700"}>{r.message}</span>;
   };
@@ -120,6 +121,7 @@ export default function ImageImportDialog({ open, onOpenChange, token, onDone })
               In Excel inserisci la foto di ogni strumento nella sua riga (<em>Inserisci → Immagini → Posiziona sopra le celle</em>,
               oppure incolla la foto), oppure scrivi l'indirizzo web della foto nella colonna URL.
             </li>
+            <li>Nella colonna <em>Marca</em> puoi scrivere la marca dello strumento (anche senza foto).</li>
             <li>Salva il file e caricalo qui: vedrai l'anteprima prima di confermare.</li>
           </ol>
 
@@ -163,7 +165,7 @@ export default function ImageImportDialog({ open, onOpenChange, token, onDone })
             <>
               <div className="flex flex-wrap gap-2 text-sm">
                 <Badge className="bg-green-100 text-green-700 hover:bg-green-100">{preview.counts.ok} pronte</Badge>
-                <Badge className="bg-amber-100 text-amber-700 hover:bg-amber-100">{preview.counts.no_image} senza foto</Badge>
+                <Badge className="bg-amber-100 text-amber-700 hover:bg-amber-100">{preview.counts.no_image} senza foto né marca</Badge>
                 <Badge className="bg-red-100 text-red-700 hover:bg-red-100">
                   {preview.counts.not_found + preview.counts.error} da correggere
                 </Badge>

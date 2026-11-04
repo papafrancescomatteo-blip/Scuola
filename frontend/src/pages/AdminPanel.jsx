@@ -82,7 +82,9 @@ export default function AdminPanel({ user, token, logout }) {
     location: "",
     calibration_date: "",
     calibration_expiry: "",
-    category: ""
+    category: "",
+    brand: "",
+    family: ""
   });
   const [instrumentLoading, setInstrumentLoading] = useState(false);
   
@@ -336,7 +338,9 @@ export default function AdminPanel({ user, token, logout }) {
           location: "",
           calibration_date: "",
           calibration_expiry: "",
-          category: ""
+          category: "",
+          brand: "",
+          family: ""
         });
         fetchData();
       }
@@ -358,7 +362,9 @@ export default function AdminPanel({ user, token, logout }) {
       location: instrument.location || "",
       calibration_date: instrument.calibration_date || "",
       calibration_expiry: instrument.calibration_expiry || "",
-      category: instrument.category || ""
+      category: instrument.category || "",
+      brand: instrument.brand || "",
+      family: instrument.family || ""
     });
     setShowInstrumentDialog(true);
   };
@@ -374,7 +380,9 @@ export default function AdminPanel({ user, token, logout }) {
       location: "",
       calibration_date: "",
       calibration_expiry: "",
-      category: ""
+      category: "",
+      brand: "",
+      family: ""
     });
     setShowInstrumentDialog(true);
   };
@@ -499,8 +507,48 @@ export default function AdminPanel({ user, token, logout }) {
   const filteredInstruments = instruments.filter((inst) =>
     inst.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
     inst.barcode?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    inst.matricola?.toLowerCase().includes(searchQuery.toLowerCase())
+    inst.matricola?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    inst.brand?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    inst.family?.toLowerCase().includes(searchQuery.toLowerCase())
   );
+
+  // Selezione multipla e assegnazione famiglia
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [showFamilyDialog, setShowFamilyDialog] = useState(false);
+  const [familyValue, setFamilyValue] = useState("");
+  const [familyLoading, setFamilyLoading] = useState(false);
+  const [familyError, setFamilyError] = useState("");
+  const existingFamilies = Array.from(new Set(instruments.map((i) => i.family).filter(Boolean))).sort();
+  const allFilteredSelected = filteredInstruments.length > 0 && filteredInstruments.every((i) => selectedIds.includes(i.instrument_id));
+  const toggleSelect = (id) => setSelectedIds((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]));
+  const toggleSelectAll = () =>
+    setSelectedIds(allFilteredSelected ? [] : filteredInstruments.map((i) => i.instrument_id));
+
+  const applyFamily = async (clear = false) => {
+    setFamilyLoading(true);
+    setFamilyError("");
+    try {
+      const res = await fetch(`${API}/instruments/bulk-family`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        credentials: "include",
+        body: JSON.stringify({ instrument_ids: selectedIds, family: clear ? "" : familyValue.trim() }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        setFamilyError(typeof d.detail === "string" ? d.detail : "Operazione non riuscita");
+        return;
+      }
+      setShowFamilyDialog(false);
+      setSelectedIds([]);
+      setFamilyValue("");
+      fetchData();
+    } catch (e) {
+      setFamilyError("Errore di connessione. Riprova.");
+    } finally {
+      setFamilyLoading(false);
+    }
+  };
 
   const getRoleBadge = (role) => {
     if (role === "admin") {
@@ -667,14 +715,28 @@ export default function AdminPanel({ user, token, logout }) {
                       </Button>
                     </div>
                   ) : (
+                    <>
+                    {selectedIds.length > 0 && (
+                      <div className="flex flex-wrap items-center gap-3 p-3 mb-4 rounded-lg bg-blue-50 border border-blue-200 sticky top-0 z-10" data-testid="bulk-bar">
+                        <span className="text-sm font-medium text-blue-900">{selectedIds.length} selezionati</span>
+                        <Button size="sm" className="bg-blue-600 hover:bg-blue-700" onClick={() => { setFamilyError(""); setShowFamilyDialog(true); }} data-testid="assign-family-btn">
+                          Assegna famiglia
+                        </Button>
+                        <Button size="sm" variant="ghost" onClick={() => setSelectedIds([])}>Annulla selezione</Button>
+                      </div>
+                    )}
                     <div className="overflow-x-auto">
                       <Table>
                         <TableHeader>
                           <TableRow>
+                            <TableHead className="w-10">
+                              <input type="checkbox" checked={allFilteredSelected} onChange={toggleSelectAll} aria-label="Seleziona tutti" data-testid="select-all-instruments" />
+                            </TableHead>
                             <TableHead>Codice a Barre</TableHead>
                             <TableHead>Matricola</TableHead>
                             <TableHead>Nome</TableHead>
-                            <TableHead>Categoria</TableHead>
+                            <TableHead>Marca</TableHead>
+                            <TableHead>Famiglia</TableHead>
                             <TableHead>Stato</TableHead>
                             <TableHead className="text-right">Azioni</TableHead>
                           </TableRow>
@@ -682,6 +744,9 @@ export default function AdminPanel({ user, token, logout }) {
                         <TableBody>
                           {filteredInstruments.map((instrument) => (
                             <TableRow key={instrument.instrument_id} className="table-row-hover">
+                              <TableCell>
+                                <input type="checkbox" checked={selectedIds.includes(instrument.instrument_id)} onChange={() => toggleSelect(instrument.instrument_id)} aria-label="Seleziona" data-testid={`select-${instrument.instrument_id}`} />
+                              </TableCell>
                               <TableCell className="font-mono text-sm">
                                 {instrument.barcode}
                               </TableCell>
@@ -692,7 +757,10 @@ export default function AdminPanel({ user, token, logout }) {
                                 {instrument.name}
                               </TableCell>
                               <TableCell className="text-slate-500">
-                                {instrument.category || "-"}
+                                {instrument.brand || "-"}
+                              </TableCell>
+                              <TableCell className="text-slate-500">
+                                {instrument.family || "-"}
                               </TableCell>
                               <TableCell>
                                 <Badge 
@@ -731,6 +799,7 @@ export default function AdminPanel({ user, token, logout }) {
                         </TableBody>
                       </Table>
                     </div>
+                    </>
                   )}
                 </CardContent>
               </Card>
@@ -995,6 +1064,30 @@ export default function AdminPanel({ user, token, logout }) {
                   />
                 </div>
                 <div className="space-y-2">
+                  <Label htmlFor="brand">Marca</Label>
+                  <Input
+                    id="brand"
+                    value={instrumentForm.brand}
+                    onChange={(e) => setInstrumentForm({...instrumentForm, brand: e.target.value})}
+                    placeholder="Mitutoyo"
+                    data-testid="instrument-brand-input"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="family">Famiglia</Label>
+                  <Input
+                    id="family"
+                    list="families-list"
+                    value={instrumentForm.family}
+                    onChange={(e) => setInstrumentForm({...instrumentForm, family: e.target.value})}
+                    placeholder="Micrometri"
+                    data-testid="instrument-family-input"
+                  />
+                  <datalist id="families-list">
+                    {existingFamilies.map((f) => <option key={f} value={f} />)}
+                  </datalist>
+                </div>
+                <div className="space-y-2">
                   <Label htmlFor="location">Posizione</Label>
                   <Input
                     id="location"
@@ -1056,6 +1149,47 @@ export default function AdminPanel({ user, token, logout }) {
         </Dialog>
 
         {/* Badge Dialog */}
+        <Dialog open={showFamilyDialog} onOpenChange={setShowFamilyDialog}>
+          <DialogContent aria-describedby={undefined}>
+            <DialogHeader>
+              <DialogTitle style={{ fontFamily: 'Work Sans' }}>Assegna famiglia</DialogTitle>
+              <DialogDescription>
+                Gli {selectedIds.length} strumenti selezionati verranno inseriti nella famiglia scelta (es. Micrometri).
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-2">
+              <Label htmlFor="bulk-family">Nome famiglia</Label>
+              <Input
+                id="bulk-family"
+                list="families-list"
+                value={familyValue}
+                onChange={(e) => setFamilyValue(e.target.value)}
+                placeholder="Micrometri"
+                data-testid="bulk-family-input"
+              />
+              {existingFamilies.length > 0 && (
+                <div className="flex flex-wrap gap-2 pt-1">
+                  {existingFamilies.map((f) => (
+                    <button key={f} type="button" onClick={() => setFamilyValue(f)} className="px-2.5 py-1 rounded-full text-xs border border-slate-200 hover:bg-slate-100">
+                      {f}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+            {familyError && (
+              <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">{familyError}</div>
+            )}
+            <DialogFooter className="gap-2">
+              <Button variant="outline" onClick={() => setShowFamilyDialog(false)}>Annulla</Button>
+              <Button variant="outline" onClick={() => applyFamily(true)} disabled={familyLoading}>Togli famiglia</Button>
+              <Button onClick={() => applyFamily(false)} disabled={familyLoading || !familyValue.trim()} className="bg-blue-600 hover:bg-blue-700" data-testid="bulk-family-confirm">
+                {familyLoading ? "Salvataggio..." : "Assegna"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
         <Dialog open={!!badgeUser} onOpenChange={(open) => { if (!open) setBadgeUser(null); }}>
           <DialogContent aria-describedby={undefined}>
             <DialogHeader>
@@ -1212,6 +1346,8 @@ export default function AdminPanel({ user, token, logout }) {
                           <TableHead>Codice</TableHead>
                           <TableHead>Matricola</TableHead>
                           <TableHead>Nome</TableHead>
+                          <TableHead>Marca</TableHead>
+                          <TableHead>Famiglia</TableHead>
                           <TableHead>Scadenza</TableHead>
                           <TableHead>Esito</TableHead>
                         </TableRow>
@@ -1223,6 +1359,8 @@ export default function AdminPanel({ user, token, logout }) {
                             <TableCell className="font-mono text-xs">{r.data.barcode || "-"}</TableCell>
                             <TableCell className="font-mono text-xs">{r.data.matricola || "-"}</TableCell>
                             <TableCell>{r.data.name || "-"}</TableCell>
+                            <TableCell>{r.data.brand || "-"}</TableCell>
+                            <TableCell>{r.data.family || "-"}</TableCell>
                             <TableCell>{r.data.calibration_expiry || "-"}</TableCell>
                             <TableCell className="text-xs">
                               {r.status === "new" ? (

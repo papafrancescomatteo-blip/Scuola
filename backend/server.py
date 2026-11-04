@@ -98,6 +98,8 @@ class InstrumentCreate(BaseModel):
     calibration_date: Optional[str] = None
     calibration_expiry: Optional[str] = None
     category: Optional[str] = None
+    brand: Optional[str] = None
+    family: Optional[str] = None
 
 class InstrumentUpdate(BaseModel):
     name: Optional[str] = None
@@ -108,6 +110,8 @@ class InstrumentUpdate(BaseModel):
     calibration_date: Optional[str] = None
     calibration_expiry: Optional[str] = None
     category: Optional[str] = None
+    brand: Optional[str] = None
+    family: Optional[str] = None
     status: Optional[str] = None
 
 class InstrumentResponse(BaseModel):
@@ -122,6 +126,8 @@ class InstrumentResponse(BaseModel):
     calibration_date: Optional[str] = None
     calibration_expiry: Optional[str] = None
     category: Optional[str] = None
+    brand: Optional[str] = None
+    family: Optional[str] = None
     current_holder: Optional[str] = None
     current_destination: Optional[str] = None
     created_at: datetime
@@ -474,6 +480,7 @@ async def get_instruments(
     search: Optional[str] = None,
     status: Optional[str] = None,
     category: Optional[str] = None,
+    family: Optional[str] = None,
     current_user: dict = Depends(get_current_user)
 ):
     query = {}
@@ -482,12 +489,16 @@ async def get_instruments(
             {"barcode": {"$regex": search, "$options": "i"}},
             {"matricola": {"$regex": search, "$options": "i"}},
             {"name": {"$regex": search, "$options": "i"}},
-            {"description": {"$regex": search, "$options": "i"}}
+            {"description": {"$regex": search, "$options": "i"}},
+            {"brand": {"$regex": search, "$options": "i"}},
+            {"family": {"$regex": search, "$options": "i"}}
         ]
     if status:
         query["status"] = status
     if category:
         query["category"] = category
+    if family:
+        query["family"] = family
     
     instruments = await db.instruments.find(query, {"_id": 0}).to_list(1000)
     
@@ -516,6 +527,33 @@ async def get_instruments_by_barcode(barcode: str, current_user: dict = Depends(
     
     return instruments
 
+# ============== FAMIGLIE ==============
+
+class BulkFamily(BaseModel):
+    instrument_ids: List[str]
+    family: Optional[str] = None  # vuoto = toglie la famiglia
+
+@api_router.get("/families")
+async def list_families(current_user: dict = Depends(get_current_user)):
+    pipeline = [
+        {"$match": {"family": {"$nin": [None, ""]}}},
+        {"$group": {"_id": "$family", "count": {"$sum": 1}}},
+        {"$sort": {"_id": 1}},
+    ]
+    items = await db.instruments.aggregate(pipeline).to_list(500)
+    without = await db.instruments.count_documents({"$or": [{"family": None}, {"family": ""}, {"family": {"$exists": False}}]})
+    return {"families": [{"name": i["_id"], "count": i["count"]} for i in items], "without_family": without}
+
+@api_router.post("/instruments/bulk-family")
+async def bulk_family(payload: BulkFamily, current_user: dict = Depends(require_admin_or_technician)):
+    family = (payload.family or "").strip()[:60] or None
+    ids = [i for i in payload.instrument_ids if i][:2000]
+    if not ids:
+        raise HTTPException(status_code=400, detail="Nessuno strumento selezionato")
+    result = await db.instruments.update_many({"instrument_id": {"$in": ids}}, {"$set": {"family": family}})
+    await log_event(current_user, "strumenti", "Famiglia assegnata", f"{result.modified_count if hasattr(result,'modified_count') else len(ids)} strumenti -> {family or '(nessuna)'}")
+    return {"updated": len(ids), "family": family}
+
 # ============== EXCEL IMPORT ==============
 
 IMPORT_COLUMNS = [
@@ -524,6 +562,8 @@ IMPORT_COLUMNS = [
     ("name", "Nome"),
     ("description", "Descrizione"),
     ("category", "Categoria"),
+    ("brand", "Marca"),
+    ("family", "Famiglia"),
     ("location", "Ubicazione"),
     ("calibration_date", "Data taratura"),
     ("calibration_expiry", "Scadenza taratura"),
@@ -537,6 +577,8 @@ IMPORT_ALIASES = {
     "name": ["nome", "strumento", "name", "nome strumento"],
     "description": ["descrizione", "description"],
     "category": ["categoria", "category"],
+    "brand": ["marca", "brand", "produttore", "costruttore"],
+    "family": ["famiglia", "family", "tipo strumento"],
     "location": ["ubicazione", "posizione", "location"],
     "calibration_date": ["data taratura", "data calibrazione", "calibration_date", "taratura"],
     "calibration_expiry": ["scadenza taratura", "scadenza calibrazione", "scadenza", "calibration_expiry"],
@@ -694,6 +736,8 @@ async def import_confirm(payload: ImportConfirm, current_user: dict = Depends(re
             "calibration_date": item.calibration_date,
             "calibration_expiry": item.calibration_expiry,
             "category": item.category,
+            "brand": (item.brand or None),
+            "family": (item.family or "").strip() or None,
             "current_holder": None,
             "current_destination": None,
             "created_at": datetime.now(timezone.utc).isoformat(),
@@ -735,6 +779,8 @@ async def create_instrument(data: InstrumentCreate, current_user: dict = Depends
         "calibration_date": data.calibration_date,
         "calibration_expiry": data.calibration_expiry,
         "category": data.category,
+        "brand": (data.brand or "").strip() or None,
+        "family": (data.family or "").strip() or None,
         "current_holder": None,
         "current_destination": None,
         "created_at": datetime.now(timezone.utc).isoformat()
@@ -753,6 +799,9 @@ async def update_instrument(instrument_id: str, data: InstrumentUpdate, current_
         raise HTTPException(status_code=404, detail="Instrument not found")
     
     update_data = {k: v for k, v in data.model_dump().items() if v is not None}
+    for k in ("brand", "family"):
+        if k in update_data:
+            update_data[k] = update_data[k].strip() or None
     
     # Check matricola uniqueness if being updated
     if "matricola" in update_data:
@@ -1441,7 +1490,7 @@ def _parse_image_sheet(content: bytes) -> list:
         raise HTTPException(status_code=400, detail="Il file non è un Excel valido (.xlsx)")
     ws = wb.worksheets[0]
 
-    col_matricola = col_url = None
+    col_matricola = col_url = col_brand = None
     header = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None) or ()
     for idx, title in enumerate(header):
         t = (str(title).strip().lower() if title is not None else "")
@@ -1449,6 +1498,8 @@ def _parse_image_sheet(content: bytes) -> list:
             col_matricola = idx
         if t.startswith("url") and col_url is None:
             col_url = idx
+        if t in ("marca", "brand") and col_brand is None:
+            col_brand = idx
     if col_matricola is None:
         raise HTTPException(status_code=400, detail="Colonna obbligatoria mancante: Matricola")
 
@@ -1468,12 +1519,13 @@ def _parse_image_sheet(content: bytes) -> list:
     for row_number, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
         matricola = _cell_to_text(row[col_matricola]) if col_matricola < len(row) else None
         url = _cell_to_text(row[col_url]) if col_url is not None and col_url < len(row) else None
+        brand = _cell_to_text(row[col_brand]) if col_brand is not None and col_brand < len(row) else None
         raw = floating[row_number][1] if row_number in floating else in_cell.get(row_number)
-        if not matricola and not raw and not url:
+        if not matricola and not raw and not url and not brand:
             continue
         if len(rows) >= 2000:
             raise HTTPException(status_code=400, detail="Troppe righe (massimo 2000)")
-        rows.append({"row": row_number, "matricola": matricola, "raw": raw, "url": url})
+        rows.append({"row": row_number, "matricola": matricola, "raw": raw, "url": url, "brand": brand})
     wb.close()
     return rows
 
@@ -1487,7 +1539,7 @@ async def _evaluate_image_rows(rows: list) -> list:
     results, seen = [], set()
     for r in rows:
         item = {"row": r["row"], "matricola": r["matricola"], "name": None, "status": "ok", "message": "",
-                "source": None, "thumb": None, "replaces": False}
+                "source": None, "thumb": None, "replaces": False, "brand": r.get("brand")}
         inst = found.get(r["matricola"]) if r["matricola"] else None
         if not r["matricola"]:
             item.update(status="error", message="Matricola mancante")
@@ -1495,12 +1547,17 @@ async def _evaluate_image_rows(rows: list) -> list:
             item.update(status="not_found", message="Matricola non presente tra gli strumenti")
         elif r["matricola"] in seen:
             item.update(status="error", message="Matricola ripetuta nel file", name=inst.get("name"))
+        elif not r["raw"] and not r["url"] and not r.get("brand"):
+            item.update(status="no_image", message="Nessuna foto né marca in questa riga", name=inst.get("name"))
         elif not r["raw"] and not r["url"]:
-            item.update(status="no_image", message="Nessuna foto in questa riga", name=inst.get("name"))
+            item.update(name=inst.get("name"), source="marca")
+            seen.add(r["matricola"])
         else:
             item["name"] = inst.get("name")
             item["replaces"] = bool(inst.get("image_url"))
-            if r["raw"]:
+            if not r["raw"] and not r["url"]:
+                pass
+            elif r["raw"]:
                 try:
                     _, thumb = _process_image(r["raw"])
                     item.update(source="foto", thumb=thumb)
@@ -1523,20 +1580,21 @@ async def import_images_template(current_user: dict = Depends(require_admin_or_t
     wb = Workbook()
     ws = wb.active
     ws.title = "Foto strumenti"
-    ws.append(["Matricola", "Foto", "URL immagine (alternativa alla foto)", "Nome strumento (solo per orientarti)"])
+    ws.append(["Matricola", "Foto", "URL immagine (alternativa alla foto)", "Marca", "Nome strumento (solo per orientarti)"])
     for cell in ws[1]:
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = PatternFill("solid", fgColor="1E3A8A")
         cell.alignment = Alignment(wrap_text=True, vertical="center")
-    instruments = await db.instruments.find({}, {"_id": 0, "matricola": 1, "name": 1}).sort("name", 1).to_list(5000)
+    instruments = await db.instruments.find({}, {"_id": 0, "matricola": 1, "name": 1, "brand": 1}).sort("name", 1).to_list(5000)
     for it in instruments:
-        ws.append([it.get("matricola"), None, None, it.get("name")])
+        ws.append([it.get("matricola"), None, None, it.get("brand"), it.get("name")])
     for i in range(2, len(instruments) + 2):
         ws.row_dimensions[i].height = 90
         ws[f"A{i}"].number_format = "@"
         ws[f"A{i}"].alignment = Alignment(vertical="center")
-        ws[f"D{i}"].alignment = Alignment(vertical="center", wrap_text=True)
-    for col, w in zip("ABCD", [18, 22, 40, 36]):
+        ws[f"D{i}"].alignment = Alignment(vertical="center")
+        ws[f"E{i}"].alignment = Alignment(vertical="center", wrap_text=True)
+    for col, w in zip("ABCDE", [18, 22, 40, 20, 36]):
         ws.column_dimensions[col].width = w
     ws.row_dimensions[1].height = 32
     ws.freeze_panes = "A2"
@@ -1570,6 +1628,13 @@ async def import_images_confirm(file: UploadFile = File(...), current_user: dict
             failed += 1
             continue
         try:
+            updates = {}
+            if src.get("brand"):
+                updates["brand"] = src["brand"][:80]
+            if not src["raw"] and not src["url"]:
+                await db.instruments.update_one({"instrument_id": inst["instrument_id"]}, {"$set": updates})
+                imported += 1
+                continue
             if src["raw"]:
                 jpeg, _ = _process_image(src["raw"])
                 image_id = f"img_{uuid.uuid4().hex[:24]}"
@@ -1586,12 +1651,13 @@ async def import_images_confirm(file: UploadFile = File(...), current_user: dict
             else:
                 await db.instrument_images.delete_many({"instrument_id": inst["instrument_id"]})
                 image_url = src["url"]
-            await db.instruments.update_one({"instrument_id": inst["instrument_id"]}, {"$set": {"image_url": image_url}})
+            updates["image_url"] = image_url
+            await db.instruments.update_one({"instrument_id": inst["instrument_id"]}, {"$set": updates})
             imported += 1
         except Exception:
             logger.exception("Importazione foto fallita per %s", res["matricola"])
             failed += 1
-    await log_event(current_user, "strumenti", "Importazione foto da Excel", f"{imported} foto importate, {failed} non riuscite")
+    await log_event(current_user, "strumenti", "Importazione foto/marche da Excel", f"{imported} righe importate, {failed} non riuscite")
     return {"imported": imported, "failed": failed}
 
 @api_router.get("/images/{image_id}")
@@ -1711,6 +1777,212 @@ async def export_logs(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": 'attachment; filename="registro_attivita.xlsx"'},
     )
+
+# ============== FILAMENTI (Bambu Lab) ==============
+
+FILAMENT_CATALOG = [
+    {"group": "PLA", "materials": ["PLA Basic", "PLA Matte", "PLA Silk+", "PLA Silk Multi-Color", "PLA Sparkle", "PLA Metal", "PLA Marble", "PLA Galaxy", "PLA Glow", "PLA Wood", "PLA Translucent", "PLA Lite", "PLA Aero", "PLA Tough+", "PLA-CF"]},
+    {"group": "PETG", "materials": ["PETG HF", "PETG Translucent", "PETG-CF"]},
+    {"group": "ABS / ASA", "materials": ["ABS", "ABS-GF", "ASA", "ASA Aero"]},
+    {"group": "Tecnici", "materials": ["PC", "PC FR", "PA6-CF", "PA6-GF", "PAHT-CF", "PET-CF", "PPA-CF"]},
+    {"group": "Flessibili", "materials": ["TPU 95A HF", "TPU 85A", "TPU 90A", "TPU for AMS"]},
+    {"group": "Supporti", "materials": ["Support for PLA", "Support for PETG", "Support for ABS", "PVA"]},
+]
+FILAMENT_STATES = ("sealed", "open", "finished")
+
+class FilamentProductIn(BaseModel):
+    material: str
+    color_name: str
+    color_hex: Optional[str] = None
+    brand: Optional[str] = "Bambu Lab"
+    spool_size_g: int = 1000
+    min_stock: int = 1          # bobine chiuse minime da tenere in magazzino
+    notes: Optional[str] = None
+
+class FilamentProductUpdate(BaseModel):
+    material: Optional[str] = None
+    color_name: Optional[str] = None
+    color_hex: Optional[str] = None
+    brand: Optional[str] = None
+    spool_size_g: Optional[int] = None
+    min_stock: Optional[int] = None
+    notes: Optional[str] = None
+
+class SpoolsAdd(BaseModel):
+    count: int = 1
+    state: str = "sealed"
+    location: Optional[str] = None
+
+class SpoolUpdate(BaseModel):
+    state: Optional[str] = None
+    remaining_g: Optional[int] = None
+    location: Optional[str] = None
+
+def _clean_hex(v):
+    v = (v or "").strip()
+    return v if re.match(r"^#[0-9a-fA-F]{6}$", v) else None
+
+async def _filaments_overview():
+    products = await db.filament_products.find({}, {"_id": 0}).sort([("material", 1), ("color_name", 1)]).to_list(2000)
+    spools = await db.filament_spools.find({"state": {"$ne": "finished"}}, {"_id": 0}).to_list(20000)
+    by_product = {}
+    for sp in spools:
+        by_product.setdefault(sp["product_id"], []).append(sp)
+    out = []
+    for p in products:
+        sl = by_product.get(p["product_id"], [])
+        sealed = [s for s in sl if s["state"] == "sealed"]
+        opened = [s for s in sl if s["state"] == "open"]
+        p["sealed"] = len(sealed)
+        p["open"] = len(opened)
+        p["open_remaining_g"] = sum(int(s.get("remaining_g") or 0) for s in opened)
+        p["total_g"] = p["sealed"] * int(p.get("spool_size_g") or 1000) + p["open_remaining_g"]
+        p["to_reorder"] = max(0, int(p.get("min_stock") or 0) - p["sealed"])
+        p["low"] = p["to_reorder"] > 0
+        p["spools"] = sorted(sl, key=lambda s: (s["state"] != "open", s.get("created_at", "")))
+        out.append(p)
+    return out
+
+@api_router.get("/filaments/catalog")
+async def filament_catalog(current_user: dict = Depends(get_current_user)):
+    return FILAMENT_CATALOG
+
+@api_router.get("/filaments")
+async def filaments_list(current_user: dict = Depends(get_current_user)):
+    items = await _filaments_overview()
+    return {
+        "products": items,
+        "summary": {
+            "products": len(items),
+            "sealed": sum(p["sealed"] for p in items),
+            "open": sum(p["open"] for p in items),
+            "to_reorder": sum(1 for p in items if p["low"]),
+        },
+    }
+
+@api_router.post("/filaments")
+async def filament_create(data: FilamentProductIn, current_user: dict = Depends(require_admin_or_technician)):
+    material, color = data.material.strip(), data.color_name.strip()
+    if not material or not color:
+        raise HTTPException(status_code=400, detail="Materiale e colore sono obbligatori")
+    dup = await db.filament_products.find_one({"material": {"$regex": f"^{re.escape(material)}$", "$options": "i"}, "color_name": {"$regex": f"^{re.escape(color)}$", "$options": "i"}}, {"_id": 1})
+    if dup:
+        raise HTTPException(status_code=400, detail="Questo filamento (materiale + colore) esiste già")
+    item = {
+        "product_id": f"fil_{uuid.uuid4().hex[:12]}",
+        "material": material[:60], "color_name": color[:60], "color_hex": _clean_hex(data.color_hex),
+        "brand": (data.brand or "Bambu Lab").strip()[:60], "spool_size_g": max(100, min(data.spool_size_g, 10000)),
+        "min_stock": max(0, min(data.min_stock, 999)), "notes": (data.notes or "").strip()[:300] or None,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.filament_products.insert_one(item)
+    item.pop("_id", None)
+    await log_event(current_user, "filamenti", "Filamento aggiunto", f"{material} - {color}")
+    return item
+
+@api_router.put("/filaments/{product_id}")
+async def filament_update(product_id: str, data: FilamentProductUpdate, current_user: dict = Depends(require_admin_or_technician)):
+    upd = {k: v for k, v in data.model_dump().items() if v is not None}
+    if "color_hex" in upd:
+        upd["color_hex"] = _clean_hex(upd["color_hex"])
+    if "min_stock" in upd:
+        upd["min_stock"] = max(0, min(upd["min_stock"], 999))
+    if "spool_size_g" in upd:
+        upd["spool_size_g"] = max(100, min(upd["spool_size_g"], 10000))
+    old = await db.filament_products.find_one({"product_id": product_id}, {"_id": 0})
+    if not old:
+        raise HTTPException(status_code=404, detail="Filamento non trovato")
+    if upd:
+        await db.filament_products.update_one({"product_id": product_id}, {"$set": upd})
+    await log_event(current_user, "filamenti", "Filamento modificato", f"{old['material']} - {old['color_name']}")
+    return {"message": "ok"}
+
+@api_router.delete("/filaments/{product_id}")
+async def filament_delete(product_id: str, current_user: dict = Depends(require_admin_or_technician)):
+    old = await db.filament_products.find_one({"product_id": product_id}, {"_id": 0})
+    if not old:
+        raise HTTPException(status_code=404, detail="Filamento non trovato")
+    await db.filament_products.delete_one({"product_id": product_id})
+    await db.filament_spools.delete_many({"product_id": product_id})
+    await log_event(current_user, "filamenti", "Filamento eliminato", f"{old['material']} - {old['color_name']}")
+    return {"message": "ok"}
+
+@api_router.post("/filaments/{product_id}/spools")
+async def filament_add_spools(product_id: str, data: SpoolsAdd, current_user: dict = Depends(require_admin_or_technician)):
+    p = await db.filament_products.find_one({"product_id": product_id}, {"_id": 0})
+    if not p:
+        raise HTTPException(status_code=404, detail="Filamento non trovato")
+    if data.state not in ("sealed", "open"):
+        raise HTTPException(status_code=400, detail="Stato non valido")
+    n = max(1, min(data.count, 50))
+    size = int(p.get("spool_size_g") or 1000)
+    for _ in range(n):
+        await db.filament_spools.insert_one({
+            "spool_id": f"spl_{uuid.uuid4().hex[:12]}", "product_id": product_id, "state": data.state,
+            "remaining_g": size, "location": (data.location or "").strip()[:60] or None,
+            "opened_at": datetime.now(timezone.utc).isoformat() if data.state == "open" else None,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+    await log_event(current_user, "filamenti", "Bobine aggiunte", f"{n} x {p['material']} - {p['color_name']} ({'chiuse' if data.state == 'sealed' else 'aperte'})")
+    return {"added": n}
+
+@api_router.put("/filaments/spools/{spool_id}")
+async def filament_update_spool(spool_id: str, data: SpoolUpdate, current_user: dict = Depends(require_admin_or_technician)):
+    sp = await db.filament_spools.find_one({"spool_id": spool_id}, {"_id": 0})
+    if not sp:
+        raise HTTPException(status_code=404, detail="Bobina non trovata")
+    upd = {}
+    if data.state is not None:
+        if data.state not in FILAMENT_STATES:
+            raise HTTPException(status_code=400, detail="Stato non valido")
+        upd["state"] = data.state
+        if data.state == "open" and sp["state"] == "sealed":
+            upd["opened_at"] = datetime.now(timezone.utc).isoformat()
+        if data.state == "finished":
+            upd["remaining_g"] = 0
+    if data.remaining_g is not None:
+        upd["remaining_g"] = max(0, min(data.remaining_g, 10000))
+        if upd["remaining_g"] == 0 and "state" not in upd:
+            upd["state"] = "finished"
+    if data.location is not None:
+        upd["location"] = data.location.strip()[:60] or None
+    if upd:
+        await db.filament_spools.update_one({"spool_id": spool_id}, {"$set": upd})
+    p = await db.filament_products.find_one({"product_id": sp["product_id"]}, {"_id": 0}) or {}
+    await log_event(current_user, "filamenti", "Bobina aggiornata", f"{p.get('material','?')} - {p.get('color_name','?')}: " + ", ".join(f"{k}={v}" for k, v in upd.items() if k != "opened_at"))
+    return {"message": "ok"}
+
+@api_router.delete("/filaments/spools/{spool_id}")
+async def filament_delete_spool(spool_id: str, current_user: dict = Depends(require_admin_or_technician)):
+    r = await db.filament_spools.delete_one({"spool_id": spool_id})
+    if r.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Bobina non trovata")
+    await log_event(current_user, "filamenti", "Bobina eliminata", spool_id)
+    return {"message": "ok"}
+
+@api_router.get("/filaments/export/xlsx")
+async def filaments_export(only_reorder: bool = False, current_user: dict = Depends(get_current_user)):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    items = await _filaments_overview()
+    if only_reorder:
+        items = [p for p in items if p["low"]]
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Da riordinare" if only_reorder else "Magazzino filamenti"
+    ws.append(["Materiale", "Colore", "Marca", "Bobina (g)", "Chiuse", "Aperte", "Residuo aperte (g)", "Scorta minima", "Da riordinare"])
+    for c in ws[1]:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="1E3A8A")
+    for p in items:
+        ws.append([p["material"], p["color_name"], p.get("brand"), p.get("spool_size_g"), p["sealed"], p["open"], p["open_remaining_g"], p.get("min_stock"), p["to_reorder"]])
+    for col, w in zip("ABCDEFGHI", [24, 22, 14, 11, 9, 9, 18, 14, 14]):
+        ws.column_dimensions[col].width = w
+    buf = io.BytesIO()
+    wb.save(buf)
+    name = "filamenti_da_riordinare.xlsx" if only_reorder else "magazzino_filamenti.xlsx"
+    return Response(content=buf.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 # ============== STATS ENDPOINT ==============
 

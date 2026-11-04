@@ -322,6 +322,18 @@ export default function InstrumentDetail({ user, token, logout }) {
                   )}
 
                   <div className="grid grid-cols-2 md:grid-cols-3 gap-6">
+                    {instrument.brand && (
+                      <div>
+                        <p className="text-xs uppercase tracking-wider text-slate-400 mb-1">Marca</p>
+                        <p className="text-slate-900 font-medium" data-testid="instrument-brand">{instrument.brand}</p>
+                      </div>
+                    )}
+                    {instrument.family && (
+                      <div>
+                        <p className="text-xs uppercase tracking-wider text-slate-400 mb-1">Famiglia</p>
+                        <p className="text-slate-900 font-medium">{instrument.family}</p>
+                      </div>
+                    )}
                     {instrument.category && (
                       <div>
                         <p className="text-xs uppercase tracking-wider text-slate-400 mb-1">Categoria</p>
