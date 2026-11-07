@@ -6,6 +6,7 @@ import { Label } from "../components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
 import { Eye, EyeOff, LogIn, CreditCard, Megaphone } from "lucide-react";
 import { API } from "../App";
+import { subscribeNfc, subscribeNfcStatus } from "../lib/nfcBridge";
 
 const SCHOOL_LOGO = "https://customer-assets.emergentagent.com/job_lab-inventory-13/artifacts/qkvfmo8i_cropped-MALIGNANI_logo-ISIS-pittogramma.png";
 const SCHOOL_IMAGE = "https://customer-assets.emergentagent.com/job_lab-inventory-13/artifacts/t62kynjy_Malignani5-optimized.webp";
@@ -18,6 +19,7 @@ export default function LoginPage({ login }) {
   const [loading, setLoading] = useState(false);
 
   const [badgeMessage, setBadgeMessage] = useState("");
+  const [nfcOn, setNfcOn] = useState(false);
   const [news, setNews] = useState([]);
 
   // News pubbliche: si vedono anche prima di fare il login
@@ -83,7 +85,14 @@ export default function LoginPage({ login }) {
     };
 
     window.addEventListener("keydown", onKeyDown, true);
-    return () => window.removeEventListener("keydown", onKeyDown, true);
+    // Lettore NFC USB (ACR122U) collegato tramite il programma lettore_nfc.py
+    const offNfc = subscribeNfc((uid) => submitBadge(uid));
+    const offStatus = subscribeNfcStatus(setNfcOn);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown, true);
+      offNfc();
+      offStatus();
+    };
   }, []);
 
   const handleSubmit = async (e) => {
@@ -140,6 +149,7 @@ export default function LoginPage({ login }) {
       {/* Right side - Login form */}
       <div className="flex items-center justify-center p-6 md:p-12 bg-white">
         <div className="w-full max-w-md">
+          <Link to="/" className="inline-flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-900 mb-6" data-testid="back-home">← Torna alla home</Link>
           <div className="flex justify-center mb-8">
             <img 
               src={SCHOOL_LOGO} 
@@ -164,7 +174,7 @@ export default function LoginPage({ login }) {
                 data-testid="badge-hint"
               >
                 <CreditCard size={20} className="text-blue-600 shrink-0" />
-                <span>{badgeMessage || "Hai una tessera? Avvicinala al lettore per accedere."}</span>
+                <span>{badgeMessage || (nfcOn ? "Lettore NFC collegato: avvicina la tessera per accedere." : "Hai una tessera? Avvicinala al lettore per accedere.")}</span>
               </div>
 
               <form onSubmit={handleSubmit} className="space-y-4">

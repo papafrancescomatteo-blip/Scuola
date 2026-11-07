@@ -15,7 +15,8 @@ import {
   DoorOpen,
   DoorClosed,
   ClipboardCheck,
-  Printer
+  Printer,
+  Inbox
 } from "lucide-react";
 
 const SCHOOL_LOGO = "https://customer-assets.emergentagent.com/job_lab-inventory-13/artifacts/qkvfmo8i_cropped-MALIGNANI_logo-ISIS-pittogramma.png";
@@ -45,6 +46,24 @@ export default function Sidebar({ user, logout, activePage }) {
       /* niente */
     }
   };
+
+  // Richieste nuove (solo admin/tecnico): numerino accanto alla voce di menu
+  const [newReq, setNewReq] = useState(0);
+  const canSeeRequests = user?.role === "admin" || user?.role === "technician";
+  useEffect(() => {
+    if (!canSeeRequests) return undefined;
+    const loadReq = async () => {
+      try {
+        const res = await fetch(`${API}/requests/count`, { headers: labHeaders(), credentials: "include" });
+        if (res.ok) setNewReq((await res.json()).nuove || 0);
+      } catch (e) { /* niente */ }
+    };
+    loadReq();
+    window.addEventListener("requests-changed", loadReq);
+    const t = setInterval(loadReq, 60000);
+    return () => { window.removeEventListener("requests-changed", loadReq); clearInterval(t); };
+    // eslint-disable-next-line
+  }, [canSeeRequests]);
 
   useEffect(() => {
     loadLabStatus();
@@ -124,6 +143,12 @@ export default function Sidebar({ user, logout, activePage }) {
       icon: ClipboardCheck,
       path: "/registro-accessi"
     });
+    navItems.push({
+      id: "richieste",
+      label: "Richieste",
+      icon: Inbox,
+      path: "/richieste"
+    });
     navItems.push({ 
       id: "admin", 
       label: user?.role === "admin" ? "Amministrazione" : "Gestione Strumenti", 
@@ -169,6 +194,9 @@ export default function Sidebar({ user, logout, activePage }) {
           >
             <item.icon size={20} />
             {!collapsed && <span>{item.label}</span>}
+            {item.id === "richieste" && newReq > 0 && (
+              <span className={`${collapsed ? "" : "ml-auto"} min-w-[20px] h-5 px-1.5 rounded-full bg-amber-500 text-white text-xs font-semibold flex items-center justify-center`} data-testid="req-badge">{newReq}</span>
+            )}
           </Link>
         ))}
       </nav>

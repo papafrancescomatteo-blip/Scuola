@@ -12,6 +12,9 @@ import SearchPage from "./pages/SearchPage";
 import LabAccessGate from "./components/LabAccessGate";
 import RegistroAccessi from "./pages/RegistroAccessi";
 import Filamenti from "./pages/Filamenti";
+import Home from "./pages/Home";
+import Richiedi from "./pages/Richiedi";
+import Richieste from "./pages/Richieste";
 
 const configuredBackendUrl = process.env.REACT_APP_BACKEND_URL || "";
 const BACKEND_URL = configuredBackendUrl
@@ -241,7 +244,16 @@ function AppRouter() {
           </ProtectedRoute>
         }
       />
-      <Route path="/" element={<Navigate to="/login" replace />} />
+      <Route path="/" element={<Home user={user} />} />
+      <Route path="/richiedi" element={<Richiedi user={user} />} />
+      <Route
+        path="/richieste"
+        element={
+          <AdminRoute user={user} loading={loading}>
+            <Richieste user={user} token={token} logout={logout} />
+          </AdminRoute>
+        }
+      />
       <Route path="*" element={<Navigate to="/dashboard" replace />} />
     </Routes>
     </>

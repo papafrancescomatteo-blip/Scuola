@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -38,6 +38,7 @@ import {
 import Sidebar from "../components/Sidebar";
 import NewsManager from "../components/NewsManager";
 import LogsViewer from "../components/LogsViewer";
+import HomeEditor from "../components/HomeEditor";
 import ImageImportDialog from "../components/ImageImportDialog";
 import { 
   Plus, 
@@ -58,9 +59,11 @@ import {
   CreditCard,
   Megaphone,
   ScrollText,
+  Globe,
   ImageIcon
 } from "lucide-react";
 import { API } from "../App";
+import { subscribeNfc } from "../lib/nfcBridge";
 
 export default function AdminPanel({ user, token, logout }) {
   const navigate = useNavigate();
@@ -158,6 +161,20 @@ export default function AdminPanel({ user, token, logout }) {
     fetchData();
   }, [token]);
 
+  // Lettore NFC USB (ACR122U): quando il dialog è aperto, la tessera passata viene assegnata subito
+  const saveBadgeRef = useRef(null);
+  useEffect(() => {
+    saveBadgeRef.current = saveBadge;
+  });
+  useEffect(() => {
+    if (!badgeUser) return undefined;
+    return subscribeNfc((uid) => {
+      setBadgeCode(uid);
+      if (saveBadgeRef.current) saveBadgeRef.current(uid);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [badgeUser && badgeUser.user_id]);
+
   // Tessere (badge)
   const openBadgeDialog = (userItem) => {
     setBadgeUser(userItem);
@@ -166,8 +183,9 @@ export default function AdminPanel({ user, token, logout }) {
     setBadgeDone("");
   };
 
-  const saveBadge = async () => {
-    if (!badgeUser || badgeCode.trim().length < 4) return;
+  const saveBadge = async (codeArg) => {
+    const code = typeof codeArg === "string" ? codeArg : badgeCode;
+    if (!badgeUser || code.trim().length < 4) return;
     setBadgeLoading(true);
     setBadgeError("");
     setBadgeDone("");
@@ -176,7 +194,7 @@ export default function AdminPanel({ user, token, logout }) {
         method: "PUT",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         credentials: "include",
-        body: JSON.stringify({ badge: badgeCode })
+        body: JSON.stringify({ badge: code })
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
@@ -596,7 +614,7 @@ export default function AdminPanel({ user, token, logout }) {
 
           <Tabs defaultValue="instruments" className="space-y-6">
             {user?.role === "admin" ? (
-              <TabsList className="grid w-full max-w-3xl grid-cols-5">
+              <TabsList className="grid w-full max-w-4xl grid-cols-6">
                 <TabsTrigger value="instruments" data-testid="instruments-tab">
                   <Package size={16} className="mr-2" />
                   Strumenti
@@ -613,13 +631,17 @@ export default function AdminPanel({ user, token, logout }) {
                   <Megaphone size={16} className="mr-2" />
                   News
                 </TabsTrigger>
+                <TabsTrigger value="home" data-testid="home-tab">
+                  <Globe size={16} className="mr-2" />
+                  Home
+                </TabsTrigger>
                 <TabsTrigger value="logs" data-testid="logs-tab">
                   <ScrollText size={16} className="mr-2" />
                   Registro
                 </TabsTrigger>
               </TabsList>
             ) : (
-              <TabsList className="grid w-full max-w-sm grid-cols-2">
+              <TabsList className="grid w-full max-w-md grid-cols-3">
                 <TabsTrigger value="instruments" data-testid="instruments-tab">
                   <Package size={16} className="mr-2" />
                   Strumenti
@@ -628,12 +650,21 @@ export default function AdminPanel({ user, token, logout }) {
                   <Megaphone size={16} className="mr-2" />
                   News
                 </TabsTrigger>
+                <TabsTrigger value="home" data-testid="home-tab">
+                  <Globe size={16} className="mr-2" />
+                  Home
+                </TabsTrigger>
               </TabsList>
             )}
 
             {/* News Tab */}
             <TabsContent value="news">
               <NewsManager token={token} />
+            </TabsContent>
+
+            {/* Home pubblica */}
+            <TabsContent value="home">
+              <HomeEditor token={token} />
             </TabsContent>
 
             {/* Logs Tab (solo admin) */}
@@ -1226,7 +1257,7 @@ export default function AdminPanel({ user, token, logout }) {
                   className="font-mono"
                   data-testid="badge-input"
                 />
-                <Button onClick={saveBadge} disabled={badgeLoading || badgeCode.trim().length < 4}>
+                <Button onClick={() => saveBadge()} disabled={badgeLoading || badgeCode.trim().length < 4}>
                   Salva
                 </Button>
               </div>

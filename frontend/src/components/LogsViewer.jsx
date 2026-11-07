@@ -17,7 +17,9 @@ const CATEGORIES = [
   ["laboratorio", "Ingressi e uscite lab"],
   ["utenti", "Utenti e tessere"],
   ["news", "News"],
-  ["registro", "Registro"]
+  ["registro", "Registro"],
+  ["home", "Home pubblica"],
+  ["richieste", "Richieste"]
 ];
 
 const PAGE = 100;
@@ -30,6 +32,8 @@ const categoryColor = (c) => {
     case "destinazioni": return "bg-purple-100 text-purple-700";
     case "utenti": return "bg-rose-100 text-rose-700";
     case "laboratorio": return "bg-cyan-100 text-cyan-700";
+    case "richieste": return "bg-violet-100 text-violet-700";
+    case "home": return "bg-sky-100 text-sky-700";
     default: return "bg-slate-100 text-slate-700";
   }
 };
