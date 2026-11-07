@@ -30,10 +30,7 @@ services:
     staticPublishPath: ./build
     envVars:
       - key: REACT_APP_BACKEND_URL
-        fromService:
-          type: web
-          name: metrology-lab-api
-          property: host
+        value: https://metrology-lab-api.onrender.com
     routes:
       - type: rewrite
         source: /*
