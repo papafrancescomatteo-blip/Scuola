@@ -6,6 +6,7 @@ import { Label } from "../components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
 import { Eye, EyeOff, LogIn, CreditCard, Megaphone } from "lucide-react";
 import { API } from "../App";
+import { phoneNfcSupported, startPhoneNfc } from "../lib/phoneNfc";
 import { subscribeNfc, subscribeNfcStatus } from "../lib/nfcBridge";
 
 const SCHOOL_LOGO = "https://customer-assets.emergentagent.com/job_lab-inventory-13/artifacts/qkvfmo8i_cropped-MALIGNANI_logo-ISIS-pittogramma.png";
@@ -20,6 +21,23 @@ export default function LoginPage({ login }) {
 
   const [badgeMessage, setBadgeMessage] = useState("");
   const [nfcOn, setNfcOn] = useState(false);
+  const [phoneListening, setPhoneListening] = useState(false);
+  const phoneStop = useRef(null);
+  const togglePhone = async () => {
+    setError("");
+    if (phoneListening) {
+      if (phoneStop.current) phoneStop.current();
+      phoneStop.current = null;
+      setPhoneListening(false);
+      return;
+    }
+    try {
+      phoneStop.current = await startPhoneNfc((uid) => window.dispatchEvent(new CustomEvent("nfc-uid", { detail: uid })), (m) => setError(m));
+      setPhoneListening(true);
+    } catch (e) {
+      setError(e?.name === "NotAllowedError" ? "Permesso NFC negato: consentilo nelle impostazioni del browser." : e.message || "NFC non disponibile");
+    }
+  };
   const [news, setNews] = useState([]);
 
   // News pubbliche: si vedono anche prima di fare il login
@@ -87,9 +105,13 @@ export default function LoginPage({ login }) {
     window.addEventListener("keydown", onKeyDown, true);
     // Lettore NFC USB (ACR122U) collegato tramite il programma lettore_nfc.py
     const offNfc = subscribeNfc((uid) => submitBadge(uid));
+    // lettura con il telefono (pulsante qui sotto): arriva come evento
+    const onPhoneUid = (ev) => submitBadge(ev.detail);
+    window.addEventListener("nfc-uid", onPhoneUid);
     const offStatus = subscribeNfcStatus(setNfcOn);
     return () => {
       window.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("nfc-uid", onPhoneUid);
       offNfc();
       offStatus();
     };
@@ -176,6 +198,16 @@ export default function LoginPage({ login }) {
                 <CreditCard size={20} className="text-blue-600 shrink-0" />
                 <span>{badgeMessage || (nfcOn ? "Lettore NFC collegato: avvicina la tessera per accedere." : "Hai una tessera? Avvicinala al lettore per accedere.")}</span>
               </div>
+              {phoneNfcSupported() && (
+                <button
+                  type="button"
+                  onClick={togglePhone}
+                  data-testid="phone-nfc-login"
+                  className="w-full mb-4 -mt-2 text-sm rounded-lg border border-blue-200 bg-blue-50 text-blue-700 py-2 font-medium hover:bg-blue-100"
+                >
+                  {phoneListening ? "In ascolto: appoggia la tessera sul retro del telefono (tocca per fermare)" : "Leggi la tessera con questo telefono"}
+                </button>
+              )}
 
               <form onSubmit={handleSubmit} className="space-y-4">
                 {error && (

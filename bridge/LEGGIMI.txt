@@ -19,6 +19,15 @@ OPPURE A MANO, OGNI VOLTA CHE USI IL SITO
 2) Apri il sito con Chrome o Edge.
 3) Nella pagina di login compare "Lettore NFC collegato". Passa il tag: entri.
 
+INGRESSO CON LA TESSERA (ANCHE SE USI IL SITO DAL TELEFONO)
+Quando il lettore e' collegato al sito (serve la chiave del lettore, vedi sotto), ogni tessera passata sul
+lettore del PC registra INGRESSO o USCITA nel Registro accessi, qualunque dispositivo stia usando la persona.
+- La chiave e' la stessa scritta su Render come variabile NFC_READER_KEY. L'installatore te la chiede;
+  oppure scrivila nel file chiave_lettore.txt (una riga) accanto a lettore_nfc.py e riavvia il lettore.
+- Nel sito, Registro accessi, vedi se il lettore del PC e' acceso.
+- Telefono Android con Chrome, acceduto come amministratore o tecnico: puo' leggere le tessere da solo
+  (Registro accessi > "Leggi tessere con questo telefono"). iPhone: non legge NFC dal sito, usa il lettore del PC.
+
 ASSEGNARE UN TAG A UNA PERSONA
 Amministrazione > Utenti > icona tessera, poi passa il tag sul lettore: viene assegnato subito.
 

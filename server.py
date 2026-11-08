@@ -1,0 +1,2473 @@
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Response, Request, UploadFile, File, Form
+from fastapi.security import HTTPBearer
+from dotenv import load_dotenv
+from starlette.middleware.cors import CORSMiddleware
+from motor.motor_asyncio import AsyncIOMotorClient
+import os
+import logging
+from pathlib import Path
+from pydantic import BaseModel, Field, EmailStr
+from typing import List, Optional
+import uuid
+from datetime import datetime, timezone, timedelta
+import bcrypt
+import jwt
+import httpx
+import io
+import re
+import hmac
+import hashlib
+import base64
+import zipfile
+import xml.etree.ElementTree as ET
+import asyncio
+from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo
+from datetime import date as date_type
+
+ROOT_DIR = Path(__file__).parent
+load_dotenv(ROOT_DIR / '.env')
+
+# MongoDB connection
+mongo_url = os.environ['MONGO_URL']
+client = AsyncIOMotorClient(mongo_url)
+db = client[os.environ['DB_NAME']]
+
+# JWT Settings
+JWT_SECRET = os.environ['JWT_SECRET']
+JWT_ALGORITHM = 'HS256'
+JWT_EXPIRATION_HOURS = 24 * 7  # 7 days
+
+app = FastAPI(title="ISIS Malignani - Metrology Lab Inventory")
+api_router = APIRouter(prefix="/api")
+security = HTTPBearer(auto_error=False)
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# ============== MODELS ==============
+
+class UserCreate(BaseModel):
+    email: EmailStr
+    password: str
+    name: str
+
+class UserLogin(BaseModel):
+    email: EmailStr
+    password: str
+
+class UserResponse(BaseModel):
+    user_id: str
+    email: str
+    name: str
+    role: str
+    picture: Optional[str] = None
+    has_badge: bool = False
+    created_at: datetime
+
+class LabEntry(BaseModel):
+    reason: Optional[str] = None
+
+class LabEntryCreate(BaseModel):
+    cognome: str
+    nome: str
+    class_name: str   # "Prof." oppure la classe dello studente (es. 4A MEC)
+    activity: str
+
+class NewsCreate(BaseModel):
+    title: str
+    body: str
+    important: bool = False
+    public: bool = True  # visibile anche nella pagina di accesso, senza login
+
+class BadgeData(BaseModel):
+    badge: str
+
+class UserUpdate(BaseModel):
+    name: Optional[str] = None
+    role: Optional[str] = None
+
+class InstrumentCreate(BaseModel):
+    barcode: str
+    matricola: str  # Unique serial number for each instrument
+    name: str
+    description: Optional[str] = None
+    image_url: Optional[str] = None
+    location: Optional[str] = None
+    calibration_date: Optional[str] = None
+    calibration_expiry: Optional[str] = None
+    category: Optional[str] = None
+    brand: Optional[str] = None
+    family: Optional[str] = None
+
+class InstrumentUpdate(BaseModel):
+    name: Optional[str] = None
+    matricola: Optional[str] = None
+    description: Optional[str] = None
+    image_url: Optional[str] = None
+    location: Optional[str] = None
+    calibration_date: Optional[str] = None
+    calibration_expiry: Optional[str] = None
+    category: Optional[str] = None
+    brand: Optional[str] = None
+    family: Optional[str] = None
+    status: Optional[str] = None
+
+class InstrumentResponse(BaseModel):
+    instrument_id: str
+    barcode: str
+    matricola: str
+    name: str
+    description: Optional[str] = None
+    image_url: Optional[str] = None
+    status: str
+    location: Optional[str] = None
+    calibration_date: Optional[str] = None
+    calibration_expiry: Optional[str] = None
+    category: Optional[str] = None
+    brand: Optional[str] = None
+    family: Optional[str] = None
+    current_holder: Optional[str] = None
+    current_destination: Optional[str] = None
+    created_at: datetime
+
+class MovementCreate(BaseModel):
+    instrument_id: str
+    movement_type: str  # "prelievo" or "deposito"
+    destination: Optional[str] = None
+    notes: Optional[str] = None
+
+class MovementResponse(BaseModel):
+    movement_id: str
+    instrument_id: str
+    instrument_name: Optional[str] = None
+    instrument_matricola: Optional[str] = None
+    user_id: str
+    user_name: Optional[str] = None
+    movement_type: str
+    destination: Optional[str] = None
+    notes: Optional[str] = None
+    timestamp: datetime
+
+# Destination models
+class DestinationCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+
+class DestinationResponse(BaseModel):
+    destination_id: str
+    name: str
+    description: Optional[str] = None
+    created_at: datetime
+
+# ============== HELPER FUNCTIONS ==============
+
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+def verify_password(password: str, hashed: str) -> bool:
+    return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
+
+def normalize_badge(raw: str) -> str:
+    """Pulisce il codice letto dal lettore: solo lettere e numeri, maiuscole."""
+    return re.sub(r"[^A-Za-z0-9]", "", raw or "").upper()
+
+def hash_badge(raw: str) -> str:
+    """Il codice della tessera non viene salvato in chiaro: si salva solo un hash con chiave segreta."""
+    return hmac.new(JWT_SECRET.encode("utf-8"), normalize_badge(raw).encode("utf-8"), hashlib.sha256).hexdigest()
+
+def public_user(user: dict) -> dict:
+    return {k: v for k, v in user.items() if k not in ("password_hash", "badge_hash")} | {"has_badge": bool(user.get("badge_hash"))}
+
+def create_jwt_token(user_id: str, email: str, role: str) -> str:
+    payload = {
+        'user_id': user_id,
+        'email': email,
+        'role': role,
+        'exp': datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRATION_HOURS)
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+def decode_jwt_token(token: str) -> dict:
+    try:
+        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+async def get_current_user(request: Request, credentials = Depends(security)) -> dict:
+    # First try cookie
+    session_token = request.cookies.get('session_token')
+    if session_token:
+        session = await db.user_sessions.find_one({"session_token": session_token}, {"_id": 0})
+        if session:
+            expires_at = session.get("expires_at")
+            if isinstance(expires_at, str):
+                expires_at = datetime.fromisoformat(expires_at)
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if expires_at > datetime.now(timezone.utc):
+                user = await db.users.find_one({"user_id": session["user_id"]}, {"_id": 0})
+                if user:
+                    return user
+    
+    # Then try Authorization header (JWT)
+    if credentials and credentials.credentials:
+        token = credentials.credentials
+        try:
+            payload = decode_jwt_token(token)
+            user = await db.users.find_one({"user_id": payload["user_id"]}, {"_id": 0})
+            if user:
+                return user
+        except:
+            pass
+    
+    raise HTTPException(status_code=401, detail="Not authenticated")
+
+async def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return current_user
+
+async def require_admin_or_technician(current_user: dict = Depends(get_current_user)) -> dict:
+    if current_user.get("role") not in ["admin", "technician"]:
+        raise HTTPException(status_code=403, detail="Admin or Technician access required")
+    return current_user
+
+# ============== LOG (registro attività) ==============
+
+async def log_event(user, category: str, action: str, details: str = ""):
+    """Scrive una riga nel registro. Non deve mai far fallire l'operazione principale."""
+    try:
+        user = user or {}
+        await db.logs.insert_one({
+            "log_id": f"log_{uuid.uuid4().hex[:12]}",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "user_id": user.get("user_id"),
+            "user_name": user.get("name"),
+            "user_email": user.get("email"),
+            "category": category,
+            "action": action,
+            "details": details,
+        })
+    except Exception:
+        logger.exception("Impossibile scrivere il log")
+
+# Aule e laboratori dell'ISIS Malignani (aggiunte una sola volta come destinazioni)
+SCHOOL_ROOMS = [
+    'A.1.01', 'A.1.02', 'A.1.03', 'A.1.04', 'A.1.05', 'A.1.06',
+    'A.1.07', 'A.1.08', 'A.1.09', 'A.1.10', 'A.1.11', 'A.1.12',
+    'A.1.13', 'A.1.14', 'A.2.01 Lab', 'A.2.02 Lab', 'A.2.03', 'A.2.04',
+    'A.2.05', 'A.2.06', 'A.2.07', 'A.2.08', 'A.2.09', 'A.2.10',
+    'A.2.11 Lab', 'A.2.12 TEAL', 'A.S.1', 'A.S.2', 'A.S.3', 'A.S.4',
+    'B.0.04 Lab', 'B.0.05 CAD', 'B.1.1 ECDL', 'B.2.01 G', 'B.2.02 / B.2.03 Fis G', 'B.2.05',
+    'B.2.06', 'B.2.07', 'B.2.10 Lab Chi', 'B.2.12 Lab Chi', 'B.2.15 G', 'B.2.16 G',
+    'B.2.17 Lab Fisica', 'B.2.18 b', 'B.2.18 c', 'C.0.01', 'C.0.02', 'C.0.03',
+    'C.0.04', 'C.0.05', 'C.0.06', 'C.0.07 TEAL', 'C.0.08 TEAL', 'C.0.09',
+    'C.0.10', 'C.1.01', 'C.1.02', 'C.1.03', 'C.1.04', 'C.1.05',
+    'C.1.06', 'C.1.07', 'C.1.08', 'C.1.09', 'C.1.10', 'C.2.01',
+    'C.2.02', 'C.2.03', 'C.2.04', 'C.2.05', 'C.2.06', 'C.2.07 TEAL',
+    'C.2.08 TEAL', 'C.2.09', 'C.2.10', 'E.0.01 Lab', 'E.0.03 G', 'E.0.04 G',
+    'E.0.05 SISTEMI ELT', 'E.0.07a Lab SISTEMI', 'E.0.07B', 'E.0.09 G', 'E.0.10 G', 'E.0.11 Lab TDP Tele Eli',
+    'E.0.14 Lab ELT', 'E.0.15 MISURE E', 'E.0.16A', 'E.0.16B Lab TDP ELT AUT', 'E.0.18 ASEM Lab', 'E.0.19 Lab Progettazione',
+    'E.0.20 Lab', 'E.0.21', 'E.S.03 PC15', 'E.S.14', 'E.S.15', 'E.S.16',
+    'E.S.22', 'E.S.23', 'E.S.24', 'E.S.25', 'E.S.26 Aula Immersiva', 'E.S.27',
+    'F.0 CNC', 'F.0 Hangar', 'F.0 LAM 1', 'F.0 LAM 2', 'F.0 MEC.01 Metrologia', 'F.0 MEC.02-QMEC',
+    'F.0 MEC.03-QTEL', 'F.0 MEC.06', 'F.0 MEC.08', 'F.0 MEC.09', 'F.0 MEC.10', 'F.0 MEC.11 LAB Aggiustaggio',
+    'F.0 MEC.11 LAB Carpenteria', 'F.0 MEC.11 LAB Saldatura', 'F.0 MUT.1', 'F.0 MUT.2', 'F.0 MUT.3', 'F.0.02 Lab Prove Mat',
+    'F.0.03 G', 'F.0.04 G', 'F.0.06/a Smart Lab', 'F.0.06/b TEAL Smart', 'F.0.08A', 'F.0.08B TEAL',
+    'F.0.09 G', 'F.0.10 G', 'F.0.12 - Petri Lab CAD', 'F.0.14', 'F.0.15 TEAL Lardinelli', 'F.0.16',
+    'F.0.17 G', 'F.0.19', 'F.0.20 TEAL', 'F.0.22A', 'F.0.22B Lab. TEAL Topografia', 'F.0.23',
+    'F.0.24', 'F.0.26', 'F.0.27', 'F.0.28a Lab Mod', 'F.S.05 Lab CAD', 'F.S.10 Lab. chi',
+    'F.S.11 aula/F.S.09 Lab. bio', 'F.S.15', 'F.S.17 Lab', 'F.S.18 Lab', 'F.S.19 Lab Inf / CAD', 'F.S.24 Lab CAD',
+    'F.S.25', 'LAB MUT', 'LAM 3', 'LAM 4',
+]
+
+
+# ============== AUTH ENDPOINTS ==============
+
+@api_router.post("/auth/register")
+async def register(user_data: UserCreate):
+    existing = await db.users.find_one({"email": user_data.email}, {"_id": 0})
+    if existing:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    
+    user_id = f"user_{uuid.uuid4().hex[:12]}"
+    user_count = await db.users.count_documents({})
+    
+    user_doc = {
+        "user_id": user_id,
+        "email": user_data.email,
+        "name": user_data.name,
+        "password_hash": hash_password(user_data.password),
+        "role": "admin" if user_count == 0 else "operator",
+        "picture": None,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    
+    await db.users.insert_one(user_doc)
+    del user_doc["password_hash"]
+    user_doc.pop("_id", None)
+    await log_event(user_doc, "accessi", "Registrazione", f"Nuovo account creato con ruolo {user_doc['role']}")
+    
+    token = create_jwt_token(user_id, user_data.email, user_doc["role"])
+    
+    return {"user": user_doc, "token": token}
+
+@api_router.post("/auth/login")
+async def login(user_data: UserLogin, response: Response):
+    user = await db.users.find_one({"email": user_data.email}, {"_id": 0})
+    if not user or not verify_password(user_data.password, user.get("password_hash", "")):
+        await log_event({"email": user_data.email}, "accessi", "Accesso fallito", f"Tentativo con email {user_data.email}")
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    token = create_jwt_token(user["user_id"], user["email"], user["role"])
+    await log_event(user, "accessi", "Accesso", "Login con email e password")
+    
+    user_response = public_user(user)
+    
+    return {"user": user_response, "token": token}
+
+@api_router.post("/auth/badge-login")
+async def badge_login(data: BadgeData):
+    code = normalize_badge(data.badge)
+    user = await db.users.find_one({"badge_hash": hash_badge(code)}, {"_id": 0}) if len(code) >= 4 else None
+    if not user:
+        await asyncio.sleep(0.7)  # rallenta i tentativi a caso
+        await log_event(None, "accessi", "Accesso con tessera fallito", "Tessera non riconosciuta")
+        raise HTTPException(status_code=401, detail="Tessera non riconosciuta")
+    token = create_jwt_token(user["user_id"], user["email"], user["role"])
+    await log_event(user, "accessi", "Accesso con tessera", "Login con tessera")
+    return {"user": public_user(user), "token": token}
+
+@api_router.post("/auth/google-session")
+async def google_session(request: Request, response: Response):
+    body = await request.json()
+    session_id = body.get("session_id")
+    
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id required")
+    
+    async with httpx.AsyncClient() as client:
+        auth_response = await client.get(
+            "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
+            headers={"X-Session-ID": session_id}
+        )
+        
+        if auth_response.status_code != 200:
+            raise HTTPException(status_code=401, detail="Invalid session")
+        
+        auth_data = auth_response.json()
+    
+    email = auth_data.get("email")
+    user = await db.users.find_one({"email": email}, {"_id": 0})
+    
+    if not user:
+        user_count = await db.users.count_documents({})
+        user_id = f"user_{uuid.uuid4().hex[:12]}"
+        user = {
+            "user_id": user_id,
+            "email": email,
+            "name": auth_data.get("name", email.split("@")[0]),
+            "role": "admin" if user_count == 0 else "operator",
+            "picture": auth_data.get("picture"),
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        await db.users.insert_one(user)
+        user.pop("_id", None)
+    
+    session_token = auth_data.get("session_token", f"session_{uuid.uuid4().hex}")
+    expires_at = datetime.now(timezone.utc) + timedelta(days=7)
+    
+    await db.user_sessions.delete_many({"user_id": user["user_id"]})
+    await db.user_sessions.insert_one({
+        "session_token": session_token,
+        "user_id": user["user_id"],
+        "expires_at": expires_at.isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat()
+    })
+    
+    response.set_cookie(
+        key="session_token",
+        value=session_token,
+        httponly=True,
+        secure=True,
+        samesite="none",
+        path="/",
+        max_age=7 * 24 * 60 * 60
+    )
+    
+    return {"user": user}
+
+@api_router.get("/auth/me")
+async def get_me(current_user: dict = Depends(get_current_user)):
+    return public_user(current_user)
+
+@api_router.post("/auth/logout")
+async def logout(request: Request, response: Response):
+    session_token = request.cookies.get("session_token")
+    if session_token:
+        await db.user_sessions.delete_many({"session_token": session_token})
+    
+    response.delete_cookie(key="session_token", path="/")
+    return {"message": "Logged out successfully"}
+
+# ============== DESTINATIONS ENDPOINTS (Admin manages pickup locations) ==============
+
+@api_router.get("/destinations", response_model=List[DestinationResponse])
+async def get_destinations(current_user: dict = Depends(get_current_user)):
+    destinations = await db.destinations.find({}, {"_id": 0}).to_list(1000)
+    for dest in destinations:
+        if isinstance(dest.get("created_at"), str):
+            dest["created_at"] = datetime.fromisoformat(dest["created_at"])
+    return destinations
+
+@api_router.post("/destinations")
+async def create_destination(data: DestinationCreate, current_user: dict = Depends(get_current_user)):
+    data.name = (data.name or "").strip()
+    if not data.name:
+        raise HTTPException(status_code=400, detail="Nome destinazione obbligatorio")
+    existing = await db.destinations.find_one(
+        {"name": {"$regex": f"^{re.escape(data.name)}$", "$options": "i"}}, {"_id": 0}
+    )
+    if existing:
+        raise HTTPException(status_code=400, detail="Destination already exists")
+    
+    destination_id = f"dest_{uuid.uuid4().hex[:12]}"
+    destination = {
+        "destination_id": destination_id,
+        "name": data.name,
+        "description": data.description,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    
+    await db.destinations.insert_one(destination)
+    destination.pop("_id", None)
+    await log_event(current_user, "destinazioni", "Destinazione creata", data.name)
+    
+    return destination
+
+@api_router.put("/destinations/{destination_id}")
+async def update_destination(destination_id: str, data: DestinationCreate, current_user: dict = Depends(require_admin)):
+    destination = await db.destinations.find_one({"destination_id": destination_id}, {"_id": 0})
+    if not destination:
+        raise HTTPException(status_code=404, detail="Destination not found")
+    
+    await db.destinations.update_one(
+        {"destination_id": destination_id},
+        {"$set": {"name": data.name, "description": data.description}}
+    )
+    
+    updated = await db.destinations.find_one({"destination_id": destination_id}, {"_id": 0})
+    await log_event(current_user, "destinazioni", "Destinazione modificata", f"{destination.get('name')} -> {data.name}")
+    return updated
+
+@api_router.delete("/destinations/{destination_id}")
+async def delete_destination(destination_id: str, current_user: dict = Depends(require_admin)):
+    old = await db.destinations.find_one({"destination_id": destination_id}, {"_id": 0})
+    result = await db.destinations.delete_one({"destination_id": destination_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Destination not found")
+    await log_event(current_user, "destinazioni", "Destinazione eliminata", (old or {}).get("name", destination_id))
+    return {"message": "Destination deleted successfully"}
+
+# ============== INSTRUMENTS ENDPOINTS ==============
+
+@api_router.get("/instruments", response_model=List[InstrumentResponse])
+async def get_instruments(
+    search: Optional[str] = None,
+    status: Optional[str] = None,
+    category: Optional[str] = None,
+    family: Optional[str] = None,
+    current_user: dict = Depends(get_current_user)
+):
+    query = {}
+    if search:
+        query["$or"] = [
+            {"barcode": {"$regex": search, "$options": "i"}},
+            {"matricola": {"$regex": search, "$options": "i"}},
+            {"name": {"$regex": search, "$options": "i"}},
+            {"description": {"$regex": search, "$options": "i"}},
+            {"brand": {"$regex": search, "$options": "i"}},
+            {"family": {"$regex": search, "$options": "i"}}
+        ]
+    if status:
+        query["status"] = status
+    if category:
+        query["category"] = category
+    if family:
+        query["family"] = family
+    
+    instruments = await db.instruments.find(query, {"_id": 0}).to_list(1000)
+    
+    for inst in instruments:
+        if isinstance(inst.get("created_at"), str):
+            inst["created_at"] = datetime.fromisoformat(inst["created_at"])
+        # Ensure matricola field exists for older records
+        if "matricola" not in inst:
+            inst["matricola"] = inst.get("barcode", "N/A")
+    
+    return instruments
+
+@api_router.get("/instruments/barcode/{barcode}")
+async def get_instruments_by_barcode(barcode: str, current_user: dict = Depends(get_current_user)):
+    """Get ALL instruments with this barcode (multiple units with same barcode, different matricola)"""
+    instruments = await db.instruments.find({"barcode": barcode}, {"_id": 0}).to_list(1000)
+    
+    if not instruments:
+        raise HTTPException(status_code=404, detail="No instruments found with this barcode")
+    
+    for inst in instruments:
+        if isinstance(inst.get("created_at"), str):
+            inst["created_at"] = datetime.fromisoformat(inst["created_at"])
+        if "matricola" not in inst:
+            inst["matricola"] = inst.get("barcode", "N/A")
+    
+    return instruments
+
+# ============== FAMIGLIE ==============
+
+class BulkFamily(BaseModel):
+    instrument_ids: List[str]
+    family: Optional[str] = None  # vuoto = toglie la famiglia
+
+@api_router.get("/families")
+async def list_families(current_user: dict = Depends(get_current_user)):
+    pipeline = [
+        {"$match": {"family": {"$nin": [None, ""]}}},
+        {"$group": {"_id": "$family", "count": {"$sum": 1}}},
+        {"$sort": {"_id": 1}},
+    ]
+    items = await db.instruments.aggregate(pipeline).to_list(500)
+    without = await db.instruments.count_documents({"$or": [{"family": None}, {"family": ""}, {"family": {"$exists": False}}]})
+    return {"families": [{"name": i["_id"], "count": i["count"]} for i in items], "without_family": without}
+
+@api_router.post("/instruments/bulk-family")
+async def bulk_family(payload: BulkFamily, current_user: dict = Depends(require_admin_or_technician)):
+    family = (payload.family or "").strip()[:60] or None
+    ids = [i for i in payload.instrument_ids if i][:2000]
+    if not ids:
+        raise HTTPException(status_code=400, detail="Nessuno strumento selezionato")
+    result = await db.instruments.update_many({"instrument_id": {"$in": ids}}, {"$set": {"family": family}})
+    await log_event(current_user, "strumenti", "Famiglia assegnata", f"{result.modified_count if hasattr(result,'modified_count') else len(ids)} strumenti -> {family or '(nessuna)'}")
+    return {"updated": len(ids), "family": family}
+
+# ============== EXCEL IMPORT ==============
+
+IMPORT_COLUMNS = [
+    ("barcode", "Codice a barre"),
+    ("matricola", "Matricola"),
+    ("name", "Nome"),
+    ("description", "Descrizione"),
+    ("category", "Categoria"),
+    ("brand", "Marca"),
+    ("family", "Famiglia"),
+    ("location", "Ubicazione"),
+    ("calibration_date", "Data taratura"),
+    ("calibration_expiry", "Scadenza taratura"),
+    ("image_url", "URL immagine"),
+]
+
+# Nomi di colonna accettati (in minuscolo) per ogni campo
+IMPORT_ALIASES = {
+    "barcode": ["codice a barre", "codice", "barcode", "codice barre"],
+    "matricola": ["matricola", "seriale", "numero di serie", "serial"],
+    "name": ["nome", "strumento", "name", "nome strumento"],
+    "description": ["descrizione", "description"],
+    "category": ["categoria", "category"],
+    "brand": ["marca", "brand", "produttore", "costruttore"],
+    "family": ["famiglia", "family", "tipo strumento"],
+    "location": ["ubicazione", "posizione", "location"],
+    "calibration_date": ["data taratura", "data calibrazione", "calibration_date", "taratura"],
+    "calibration_expiry": ["scadenza taratura", "scadenza calibrazione", "scadenza", "calibration_expiry"],
+    "image_url": ["url immagine", "immagine", "image_url", "foto"],
+}
+
+def _cell_to_text(value) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date_type):
+        return value.isoformat()
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    text = str(value).strip()
+    return text or None
+
+def _normalize_date(text: Optional[str]) -> Optional[str]:
+    """Converte date tipo 31/12/2026 in 2026-12-31; lascia invariato il resto."""
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(text, fmt).date().isoformat()
+        except ValueError:
+            continue
+    return text
+
+@api_router.get("/instruments/import/template")
+async def import_template(current_user: dict = Depends(require_admin_or_technician)):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Strumenti"
+    ws.append([label for _, label in IMPORT_COLUMNS])
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="1E3A8A")
+    ws.append(["121234567890", "MCEX-001", "Micrometro esterno 0-25 mm", "Esempio di descrizione",
+               "Misurazione", "Armadio A", "2026-01-15", "2027-01-15", ""])
+    widths = [20, 16, 32, 36, 18, 18, 18, 18, 30]
+    for i, w in enumerate(widths):
+        ws.column_dimensions[chr(65 + i)].width = w
+    # Codice a barre, matricola e date come testo, per non perdere zeri e formato
+    for col in ("A", "B", "G", "H"):
+        for row in range(2, 502):
+            ws[f"{col}{row}"].number_format = "@"
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="modello_strumenti.xlsx"'},
+    )
+
+@api_router.post("/instruments/import/preview")
+async def import_preview(file: UploadFile = File(...), current_user: dict = Depends(require_admin_or_technician)):
+    from openpyxl import load_workbook
+    content = await file.read()
+    if len(content) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="File troppo grande (massimo 5 MB)")
+    try:
+        wb = load_workbook(io.BytesIO(content), data_only=True, read_only=True)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Il file non è un Excel valido (.xlsx)")
+
+    ws = wb.active
+    rows_iter = ws.iter_rows(values_only=True)
+    header = next(rows_iter, None)
+    if not header:
+        raise HTTPException(status_code=400, detail="Il file è vuoto")
+
+    # Associa le colonne ai campi
+    col_index = {}
+    for idx, title in enumerate(header):
+        t = (str(title).strip().lower() if title is not None else "")
+        for field, aliases in IMPORT_ALIASES.items():
+            if t in aliases and field not in col_index:
+                col_index[field] = idx
+    missing = [label for field, label in IMPORT_COLUMNS if field in ("barcode", "matricola", "name") and field not in col_index]
+    if missing:
+        raise HTTPException(status_code=400, detail="Colonne obbligatorie mancanti: " + ", ".join(missing))
+
+    parsed = []
+    for row_number, row in enumerate(rows_iter, start=2):
+        if row is None or all(c is None or str(c).strip() == "" for c in row):
+            continue
+        if len(parsed) >= 2000:
+            raise HTTPException(status_code=400, detail="Troppe righe (massimo 2000)")
+        data = {}
+        for field, _ in IMPORT_COLUMNS:
+            idx = col_index.get(field)
+            data[field] = _cell_to_text(row[idx]) if idx is not None and idx < len(row) else None
+        data["calibration_date"] = _normalize_date(data["calibration_date"])
+        data["calibration_expiry"] = _normalize_date(data["calibration_expiry"])
+        parsed.append({"row": row_number, "data": data})
+    wb.close()
+
+    existing = set()
+    matricole = [r["data"]["matricola"] for r in parsed if r["data"]["matricola"]]
+    if matricole:
+        async for doc in db.instruments.find({"matricola": {"$in": matricole}}, {"_id": 0, "matricola": 1}):
+            existing.add(doc["matricola"])
+
+    seen = set()
+    result = []
+    for r in parsed:
+        d = r["data"]
+        status, message = "new", ""
+        if not d["barcode"] or not d["matricola"] or not d["name"]:
+            status, message = "error", "Mancano codice a barre, matricola o nome"
+        elif d["matricola"] in existing:
+            status, message = "duplicate", "Matricola già presente nel sistema"
+        elif d["matricola"] in seen:
+            status, message = "duplicate", "Matricola ripetuta nel file"
+        else:
+            seen.add(d["matricola"])
+        result.append({"row": r["row"], "data": d, "status": status, "message": message})
+
+    return {
+        "rows": result,
+        "counts": {
+            "new": sum(1 for r in result if r["status"] == "new"),
+            "duplicate": sum(1 for r in result if r["status"] == "duplicate"),
+            "error": sum(1 for r in result if r["status"] == "error"),
+        },
+    }
+
+class ImportConfirm(BaseModel):
+    rows: List[InstrumentCreate]
+
+@api_router.post("/instruments/import/confirm")
+async def import_confirm(payload: ImportConfirm, current_user: dict = Depends(require_admin_or_technician)):
+    imported, skipped = 0, 0
+    seen = set()
+    for item in payload.rows:
+        if not item.barcode or not item.matricola or not item.name or item.matricola in seen:
+            skipped += 1
+            continue
+        if await db.instruments.find_one({"matricola": item.matricola}, {"_id": 1}):
+            skipped += 1
+            continue
+        seen.add(item.matricola)
+        await db.instruments.insert_one({
+            "instrument_id": f"inst_{uuid.uuid4().hex[:12]}",
+            "barcode": item.barcode,
+            "matricola": item.matricola,
+            "name": item.name,
+            "description": item.description,
+            "image_url": item.image_url,
+            "status": "available",
+            "location": item.location,
+            "calibration_date": item.calibration_date,
+            "calibration_expiry": item.calibration_expiry,
+            "category": item.category,
+            "brand": (item.brand or None),
+            "family": (item.family or "").strip() or None,
+            "current_holder": None,
+            "current_destination": None,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+        imported += 1
+    await log_event(current_user, "strumenti", "Importazione Excel", f"{imported} strumenti importati, {skipped} saltati")
+    return {"imported": imported, "skipped": skipped}
+
+@api_router.get("/instruments/{instrument_id}")
+async def get_instrument(instrument_id: str, current_user: dict = Depends(get_current_user)):
+    instrument = await db.instruments.find_one({"instrument_id": instrument_id}, {"_id": 0})
+    if not instrument:
+        raise HTTPException(status_code=404, detail="Instrument not found")
+    
+    if isinstance(instrument.get("created_at"), str):
+        instrument["created_at"] = datetime.fromisoformat(instrument["created_at"])
+    if "matricola" not in instrument:
+        instrument["matricola"] = instrument.get("barcode", "N/A")
+    
+    return instrument
+
+@api_router.post("/instruments")
+async def create_instrument(data: InstrumentCreate, current_user: dict = Depends(require_admin_or_technician)):
+    # Check if matricola is unique (matricola must be unique, barcode can be shared)
+    existing = await db.instruments.find_one({"matricola": data.matricola}, {"_id": 0})
+    if existing:
+        raise HTTPException(status_code=400, detail="Matricola already exists")
+    
+    instrument_id = f"inst_{uuid.uuid4().hex[:12]}"
+    instrument = {
+        "instrument_id": instrument_id,
+        "barcode": data.barcode,
+        "matricola": data.matricola,
+        "name": data.name,
+        "description": data.description,
+        "image_url": data.image_url,
+        "status": "available",
+        "location": data.location,
+        "calibration_date": data.calibration_date,
+        "calibration_expiry": data.calibration_expiry,
+        "category": data.category,
+        "brand": (data.brand or "").strip() or None,
+        "family": (data.family or "").strip() or None,
+        "current_holder": None,
+        "current_destination": None,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    
+    await db.instruments.insert_one(instrument)
+    instrument.pop("_id", None)
+    await log_event(current_user, "strumenti", "Strumento creato", f"{data.name} (matricola {data.matricola})")
+    
+    return instrument
+
+@api_router.put("/instruments/{instrument_id}")
+async def update_instrument(instrument_id: str, data: InstrumentUpdate, current_user: dict = Depends(require_admin_or_technician)):
+    instrument = await db.instruments.find_one({"instrument_id": instrument_id}, {"_id": 0})
+    if not instrument:
+        raise HTTPException(status_code=404, detail="Instrument not found")
+    
+    update_data = {k: v for k, v in data.model_dump().items() if v is not None}
+    for k in ("brand", "family"):
+        if k in update_data:
+            update_data[k] = update_data[k].strip() or None
+    
+    # Check matricola uniqueness if being updated
+    if "matricola" in update_data:
+        existing = await db.instruments.find_one({
+            "matricola": update_data["matricola"],
+            "instrument_id": {"$ne": instrument_id}
+        }, {"_id": 0})
+        if existing:
+            raise HTTPException(status_code=400, detail="Matricola already exists")
+    
+    if update_data:
+        await db.instruments.update_one({"instrument_id": instrument_id}, {"$set": update_data})
+    
+    updated = await db.instruments.find_one({"instrument_id": instrument_id}, {"_id": 0})
+    changed = ", ".join(sorted(update_data.keys())) or "nessun campo"
+    await log_event(current_user, "strumenti", "Strumento modificato", f"{instrument.get('name')} (matricola {instrument.get('matricola')}) - campi: {changed}")
+    return updated
+
+@api_router.delete("/instruments/{instrument_id}")
+async def delete_instrument(instrument_id: str, current_user: dict = Depends(require_admin_or_technician)):
+    old = await db.instruments.find_one({"instrument_id": instrument_id}, {"_id": 0})
+    result = await db.instruments.delete_one({"instrument_id": instrument_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Instrument not found")
+    await db.instrument_images.delete_many({"instrument_id": instrument_id})
+    await log_event(current_user, "strumenti", "Strumento eliminato", f"{(old or {}).get('name')} (matricola {(old or {}).get('matricola')})")
+    
+    await db.movements.delete_many({"instrument_id": instrument_id})
+    
+    return {"message": "Instrument deleted successfully"}
+
+# ============== MOVEMENTS ENDPOINTS ==============
+
+@api_router.post("/movements")
+async def create_movement(data: MovementCreate, current_user: dict = Depends(get_current_user)):
+    instrument = await db.instruments.find_one({"instrument_id": data.instrument_id}, {"_id": 0})
+    if not instrument:
+        raise HTTPException(status_code=404, detail="Instrument not found")
+    
+    if data.movement_type == "prelievo":
+        if instrument.get("status") == "in_use":
+            raise HTTPException(status_code=400, detail="Instrument is already in use")
+        if not data.destination:
+            raise HTTPException(status_code=400, detail="Destination is required for prelievo")
+        update_data = {
+            "status": "in_use",
+            "current_holder": current_user["user_id"],
+            "current_destination": data.destination
+        }
+    elif data.movement_type == "deposito":
+        if instrument.get("status") == "available":
+            raise HTTPException(status_code=400, detail="Instrument is already available")
+        update_data = {
+            "status": "available",
+            "current_holder": None,
+            "current_destination": None
+        }
+    else:
+        raise HTTPException(status_code=400, detail="Invalid movement type")
+    
+    await db.instruments.update_one({"instrument_id": data.instrument_id}, {"$set": update_data})
+    
+    movement_id = f"mov_{uuid.uuid4().hex[:12]}"
+    movement = {
+        "movement_id": movement_id,
+        "instrument_id": data.instrument_id,
+        "instrument_name": instrument.get("name"),
+        "instrument_matricola": instrument.get("matricola", instrument.get("barcode")),
+        "user_id": current_user["user_id"],
+        "user_name": current_user.get("name"),
+        "movement_type": data.movement_type,
+        "destination": data.destination,
+        "notes": data.notes,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+    
+    await db.movements.insert_one(movement)
+    movement.pop("_id", None)
+    label = "Prelievo" if data.movement_type == "prelievo" else "Deposito"
+    where = f" -> {data.destination}" if data.destination else ""
+    await log_event(current_user, "movimenti", label, f"{instrument.get('name')} (matricola {instrument.get('matricola', instrument.get('barcode'))}){where}")
+    
+    return movement
+
+@api_router.get("/movements", response_model=List[MovementResponse])
+async def get_movements(
+    instrument_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    limit: int = 100,
+    current_user: dict = Depends(get_current_user)
+):
+    query = {}
+    if instrument_id:
+        query["instrument_id"] = instrument_id
+    if user_id:
+        query["user_id"] = user_id
+    
+    movements = await db.movements.find(query, {"_id": 0}).sort("timestamp", -1).to_list(limit)
+    
+    for mov in movements:
+        if isinstance(mov.get("timestamp"), str):
+            mov["timestamp"] = datetime.fromisoformat(mov["timestamp"])
+        if "instrument_matricola" not in mov:
+            mov["instrument_matricola"] = None
+    
+    return movements
+
+@api_router.get("/movements/instrument/{instrument_id}", response_model=List[MovementResponse])
+async def get_instrument_movements(instrument_id: str, current_user: dict = Depends(get_current_user)):
+    movements = await db.movements.find({"instrument_id": instrument_id}, {"_id": 0}).sort("timestamp", -1).to_list(100)
+    
+    for mov in movements:
+        if isinstance(mov.get("timestamp"), str):
+            mov["timestamp"] = datetime.fromisoformat(mov["timestamp"])
+        if "instrument_matricola" not in mov:
+            mov["instrument_matricola"] = None
+    
+    return movements
+
+# ============== USERS MANAGEMENT (ADMIN) ==============
+
+@api_router.get("/users", response_model=List[UserResponse])
+async def get_users(current_user: dict = Depends(require_admin)):
+    users = await db.users.find({}, {"_id": 0, "password_hash": 0}).to_list(1000)
+    
+    for user in users:
+        user["has_badge"] = bool(user.pop("badge_hash", None))
+        if isinstance(user.get("created_at"), str):
+            user["created_at"] = datetime.fromisoformat(user["created_at"])
+    
+    return users
+
+@api_router.put("/users/{user_id}")
+async def update_user(user_id: str, data: UserUpdate, current_user: dict = Depends(require_admin)):
+    user = await db.users.find_one({"user_id": user_id}, {"_id": 0})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    update_data = {k: v for k, v in data.model_dump().items() if v is not None}
+    
+    if update_data:
+        await db.users.update_one({"user_id": user_id}, {"$set": update_data})
+    
+    updated = await db.users.find_one({"user_id": user_id}, {"_id": 0, "password_hash": 0, "badge_hash": 0})
+    changes = ", ".join(f"{k}={v}" for k, v in update_data.items()) or "nessuna modifica"
+    await log_event(current_user, "utenti", "Utente modificato", f"{user.get('name')}: {changes}")
+    return updated
+
+@api_router.put("/users/{user_id}/badge")
+async def set_user_badge(user_id: str, data: BadgeData, current_user: dict = Depends(require_admin)):
+    user = await db.users.find_one({"user_id": user_id}, {"_id": 0})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    code = normalize_badge(data.badge)
+    if len(code) < 4:
+        raise HTTPException(status_code=400, detail="Codice tessera non valido o troppo corto")
+    badge_hash = hash_badge(code)
+    other = await db.users.find_one({"badge_hash": badge_hash, "user_id": {"$ne": user_id}}, {"_id": 0})
+    if other:
+        raise HTTPException(status_code=400, detail=f"Tessera già assegnata a {other.get('name', 'un altro utente')}")
+    await db.users.update_one({"user_id": user_id}, {"$set": {"badge_hash": badge_hash}})
+    await log_event(current_user, "utenti", "Tessera assegnata", f"Utente: {user.get('name')}")
+    return {"message": "Tessera assegnata", "has_badge": True}
+
+@api_router.delete("/users/{user_id}/badge")
+async def remove_user_badge(user_id: str, current_user: dict = Depends(require_admin)):
+    result = await db.users.update_one({"user_id": user_id}, {"$unset": {"badge_hash": ""}})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="User not found")
+    await log_event(current_user, "utenti", "Tessera rimossa", f"user_id: {user_id}")
+    return {"message": "Tessera rimossa", "has_badge": False}
+
+@api_router.delete("/users/{user_id}")
+async def delete_user(user_id: str, current_user: dict = Depends(require_admin)):
+    if user_id == current_user["user_id"]:
+        raise HTTPException(status_code=400, detail="Cannot delete yourself")
+    
+    old = await db.users.find_one({"user_id": user_id}, {"_id": 0})
+    result = await db.users.delete_one({"user_id": user_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    await db.user_sessions.delete_many({"user_id": user_id})
+    await log_event(current_user, "utenti", "Utente eliminato", f"{(old or {}).get('name')} ({(old or {}).get('email')})")
+    
+    return {"message": "User deleted successfully"}
+
+# ============== REGISTRO ACCESSI AL LABORATORIO ==============
+
+ROME = ZoneInfo("Europe/Rome")
+
+def _today_rome() -> str:
+    return datetime.now(ROME).date().isoformat()
+
+async def _open_access(user_id: str):
+    """Ultimo ingresso non ancora chiuso da una firma di uscita."""
+    return await db.lab_access.find_one(
+        {"user_id": user_id, "exit_time": None, "exit_missing": {"$ne": True}},
+        {"_id": 0},
+        sort=[("entry_time", -1)],
+    )
+
+@api_router.get("/lab-access/current")
+async def lab_access_current(current_user: dict = Depends(get_current_user)):
+    rec = await _open_access(current_user["user_id"])
+    if rec and rec.get("date") == _today_rome():
+        return {"in_lab": True, "record": rec}
+    return {"in_lab": False, "record": None}
+
+@api_router.post("/lab-access/entry")
+async def lab_access_entry(data: LabEntry, current_user: dict = Depends(get_current_user)):
+    rec = await _open_access(current_user["user_id"])
+    if rec:
+        if rec.get("date") == _today_rome():
+            return {"in_lab": True, "record": rec}
+        # ingresso di un giorno passato senza firma di uscita: lo segna come "uscita non firmata"
+        await db.lab_access.update_many(
+            {"user_id": current_user["user_id"], "exit_time": None},
+            {"$set": {"exit_missing": True}},
+        )
+    now = datetime.now(timezone.utc)
+    record = {
+        "access_id": f"acc_{uuid.uuid4().hex[:12]}",
+        "user_id": current_user["user_id"],
+        "user_name": current_user.get("name"),
+        "user_email": current_user.get("email"),
+        "role": current_user.get("role"),
+        "date": now.astimezone(ROME).date().isoformat(),
+        "entry_time": now.isoformat(),
+        "exit_time": None,
+        "exit_missing": False,
+        "reason": (data.reason or "").strip()[:200] or None,
+    }
+    await db.lab_access.insert_one(record)
+    record.pop("_id", None)
+    await log_event(current_user, "laboratorio", "Ingresso in laboratorio", record["reason"] or "")
+    return {"in_lab": True, "record": record}
+
+@api_router.post("/lab-access/exit")
+async def lab_access_exit(current_user: dict = Depends(get_current_user)):
+    rec = await _open_access(current_user["user_id"])
+    if not rec:
+        raise HTTPException(status_code=400, detail="Nessun ingresso da chiudere")
+    exit_time = datetime.now(timezone.utc).isoformat()
+    await db.lab_access.update_one({"access_id": rec["access_id"]}, {"$set": {"exit_time": exit_time}})
+    await log_event(current_user, "laboratorio", "Uscita dal laboratorio", "Uscita firmata")
+    rec["exit_time"] = exit_time
+    return {"in_lab": False, "record": rec}
+
+def _lab_query(date_from: Optional[str], date_to: Optional[str], search: Optional[str]) -> dict:
+    query = {}
+    dates = {}
+    if date_from:
+        dates["$gte"] = date_from
+    if date_to:
+        dates["$lte"] = date_to
+    if dates:
+        query["date"] = dates
+    if search:
+        rx = {"$regex": re.escape(search), "$options": "i"}
+        query["$or"] = [{"user_name": rx}, {"user_email": rx}, {"reason": rx}]
+    return query
+
+@api_router.get("/lab-access")
+async def get_lab_access(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    search: Optional[str] = None,
+    limit: int = 100,
+    skip: int = 0,
+    current_user: dict = Depends(require_admin),
+):
+    query = _lab_query(date_from, date_to, search)
+    total = await db.lab_access.count_documents(query)
+    items = await db.lab_access.find(query, {"_id": 0}).sort("entry_time", -1).skip(max(skip, 0)).to_list(max(1, min(limit, 500)))
+    return {"items": items, "total": total}
+
+@api_router.get("/lab-access/export")
+async def export_lab_access(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    search: Optional[str] = None,
+    current_user: dict = Depends(require_admin),
+):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    items = await db.lab_access.find(_lab_query(date_from, date_to, search), {"_id": 0}).sort("entry_time", -1).to_list(20000)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Accessi laboratorio"
+    ws.append(["Data", "Nome", "Email", "Ora ingresso", "Ora uscita", "Durata (min)", "Motivo", "Uscita non firmata"])
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="1E3A8A")
+    for it in items:
+        entry = datetime.fromisoformat(it["entry_time"]).astimezone(ROME)
+        exit_dt = datetime.fromisoformat(it["exit_time"]).astimezone(ROME) if it.get("exit_time") else None
+        minutes = round((exit_dt - entry).total_seconds() / 60) if exit_dt else None
+        ws.append([
+            entry.strftime("%d/%m/%Y"), it.get("user_name") or "-", it.get("user_email") or "-",
+            entry.strftime("%H:%M"), exit_dt.strftime("%H:%M") if exit_dt else "",
+            minutes if minutes is not None else "", it.get("reason") or "",
+            "Sì" if it.get("exit_missing") else "",
+        ])
+    for col, w in zip("ABCDEFGH", [12, 24, 30, 13, 12, 13, 40, 18]):
+        ws.column_dimensions[col].width = w
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    await log_event(current_user, "registro", "Esportazione accessi laboratorio", f"{len(items)} righe")
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="accessi_laboratorio.xlsx"'},
+    )
+
+# ============== REGISTRO ACCESSI LABORATORIO ==============
+
+ROME = ZoneInfo("Europe/Rome")
+
+def _rome_day_start_utc(day: str) -> str:
+    """'2026-10-28' -> inizio di quel giorno (ora italiana) in UTC, come testo ISO."""
+    d = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=ROME)
+    return d.astimezone(timezone.utc).isoformat()
+
+def _lab_query(date_from: Optional[str], date_to: Optional[str], search: Optional[str]) -> dict:
+    query = {}
+    try:
+        if date_from:
+            query.setdefault("entry_time", {})["$gte"] = _rome_day_start_utc(date_from)
+        if date_to:
+            end = datetime.strptime(date_to, "%Y-%m-%d").replace(tzinfo=ROME) + timedelta(days=1)
+            query.setdefault("entry_time", {})["$lt"] = end.astimezone(timezone.utc).isoformat()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Data non valida (usa AAAA-MM-GG)")
+    if search:
+        rx = {"$regex": re.escape(search), "$options": "i"}
+        query["$or"] = [{"cognome": rx}, {"nome": rx}, {"class_name": rx}, {"activity": rx}]
+    return query
+
+async def _open_entry(user_id: str):
+    """Ingresso senza uscita. Se è di un giorno passato lo chiude come 'uscita non registrata'."""
+    entry = await db.lab_access.find_one(
+        {"user_id": user_id, "exit_time": None, "exit_missing": {"$ne": True}}, {"_id": 0}
+    )
+    if not entry:
+        return None
+    entered = datetime.fromisoformat(entry["entry_time"]).astimezone(ROME).date()
+    if entered < datetime.now(ROME).date():
+        await db.lab_access.update_one({"access_id": entry["access_id"]}, {"$set": {"exit_missing": True}})
+        return None
+    return entry
+
+@api_router.get("/lab/status")
+async def lab_status(current_user: dict = Depends(get_current_user)):
+    entry = await _open_entry(current_user["user_id"])
+    last = await db.lab_access.find({"user_id": current_user["user_id"]}, {"_id": 0}).sort("entry_time", -1).to_list(1)
+    last_info = None
+    if last:
+        last_info = {k: last[0].get(k) for k in ("cognome", "nome", "class_name")}
+    return {"inside": bool(entry), "entry": entry, "last": last_info}
+
+@api_router.post("/lab/entry")
+async def lab_entry(data: LabEntryCreate, current_user: dict = Depends(get_current_user)):
+    cognome, nome = data.cognome.strip(), data.nome.strip()
+    class_name, activity = data.class_name.strip(), data.activity.strip()
+    if not cognome or not nome or not class_name or not activity:
+        raise HTTPException(status_code=400, detail="Compila cognome, nome, classe (o Prof.) e attività svolta")
+    existing = await _open_entry(current_user["user_id"])
+    if existing:
+        return {"inside": True, "entry": existing}
+    entry = {
+        "access_id": f"acc_{uuid.uuid4().hex[:12]}",
+        "user_id": current_user["user_id"],
+        "user_email": current_user.get("email"),
+        "cognome": cognome[:60],
+        "nome": nome[:60],
+        "class_name": class_name[:40],
+        "activity": activity[:300],
+        "entry_time": datetime.now(timezone.utc).isoformat(),
+        "exit_time": None,
+        "exit_missing": False,
+        "signed_by": current_user.get("name"),
+    }
+    await db.lab_access.insert_one(entry)
+    entry.pop("_id", None)
+    await log_event(current_user, "laboratorio", "Ingresso in laboratorio", f"{cognome} {nome} ({entry['class_name']}) - {entry['activity']}")
+    return {"inside": True, "entry": entry}
+
+@api_router.post("/lab/exit")
+async def lab_exit(current_user: dict = Depends(get_current_user)):
+    entry = await _open_entry(current_user["user_id"])
+    if not entry:
+        raise HTTPException(status_code=400, detail="Non risulti dentro il laboratorio")
+    exit_time = datetime.now(timezone.utc).isoformat()
+    await db.lab_access.update_one({"access_id": entry["access_id"]}, {"$set": {"exit_time": exit_time}})
+    entry["exit_time"] = exit_time
+    await log_event(current_user, "laboratorio", "Uscita dal laboratorio", f"{entry['cognome']} {entry['nome']}")
+    return {"inside": False, "entry": entry}
+
+@api_router.get("/lab/access")
+async def lab_access_list(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    search: Optional[str] = None,
+    limit: int = 100,
+    skip: int = 0,
+    current_user: dict = Depends(require_admin_or_technician),
+):
+    query = _lab_query(date_from, date_to, search)
+    total = await db.lab_access.count_documents(query)
+    items = await db.lab_access.find(query, {"_id": 0}).sort("entry_time", -1).skip(max(skip, 0)).to_list(max(1, min(limit, 500)))
+    return {"items": items, "total": total}
+
+@api_router.get("/lab/access/export")
+async def lab_access_export(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    search: Optional[str] = None,
+    current_user: dict = Depends(require_admin_or_technician),
+):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    items = await db.lab_access.find(_lab_query(date_from, date_to, search), {"_id": 0}).sort("entry_time", 1).to_list(20000)
+
+    now = datetime.now(ROME)
+    start_year = now.year if now.month >= 9 else now.year - 1
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Registro accessi"
+    ws.append(["REGISTRO ACCESSI – LABORATORIO DI METROLOGIA"])
+    ws.append([f"Anno scolastico {start_year}/{start_year + 1}"])
+    ws.append([])
+    headers = ["Data", "Cognome", "Nome", "Classe", "Ora ingresso", "Ora uscita", "Attività svolta", "Firma"]
+    ws.append(headers)
+    ws["A1"].font = Font(bold=True, size=14)
+    ws["A2"].font = Font(italic=True)
+    thin = Side(style="thin", color="999999")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    for cell in ws[4]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="1E3A8A")
+        cell.border = border
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    for it in items:
+        entered = datetime.fromisoformat(it["entry_time"]).astimezone(ROME)
+        exited = datetime.fromisoformat(it["exit_time"]).astimezone(ROME) if it.get("exit_time") else None
+        if exited:
+            firma = f"Firmato digitalmente: {it.get('signed_by') or ''}"
+        elif it.get("exit_missing"):
+            firma = f"Uscita non registrata ({it.get('signed_by') or ''})"
+        else:
+            firma = f"Ingresso firmato: {it.get('signed_by') or ''} (ancora dentro)"
+        ws.append([
+            entered.strftime("%d/%m/%Y"), it.get("cognome"), it.get("nome"), it.get("class_name"),
+            entered.strftime("%H:%M"), exited.strftime("%H:%M") if exited else "", it.get("activity"), firma,
+        ])
+    for row in ws.iter_rows(min_row=5, max_row=ws.max_row):
+        for cell in row:
+            cell.border = border
+            cell.alignment = Alignment(vertical="center", wrap_text=True)
+    for col, w in zip("ABCDEFGH", [12, 18, 18, 12, 13, 12, 44, 36]):
+        ws.column_dimensions[col].width = w
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    await log_event(current_user, "registro", "Esportazione registro accessi", f"{len(items)} righe")
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="registro_accessi_laboratorio.xlsx"'},
+    )
+
+@api_router.get("/lab/access/export-docx")
+async def lab_access_export_docx(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    search: Optional[str] = None,
+    current_user: dict = Depends(require_admin_or_technician),
+):
+    """Registro accessi compilato, nel formato del modulo Word originale."""
+    import copy
+    from docx import Document
+    from docx.oxml.ns import qn
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    template_path = ROOT_DIR / "templates" / "registro_accessi.docx"
+    if not template_path.exists():
+        raise HTTPException(status_code=500, detail="Modello Word non trovato sul server")
+
+    items = await db.lab_access.find(_lab_query(date_from, date_to, search), {"_id": 0}).sort("entry_time", 1).to_list(5000)
+
+    doc = Document(str(template_path))
+    table = doc.tables[0]
+    blank_row = copy.deepcopy(table.rows[1]._tr)
+    for row in list(table.rows)[1:]:
+        table._tbl.remove(row._tr)
+
+    centered = {0, 3, 4, 5}  # Data, Classe, Ora ingresso, Ora uscita
+
+    def add_row(values):
+        tr = copy.deepcopy(blank_row)
+        table._tbl.append(tr)
+        row = table.rows[-1]
+        for idx, value in enumerate(values):
+            para = row.cells[idx].paragraphs[0]
+            if value:
+                para.add_run(str(value))
+            if idx in centered:
+                para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    for it in items:
+        entered = datetime.fromisoformat(it["entry_time"]).astimezone(ROME)
+        exited = datetime.fromisoformat(it["exit_time"]).astimezone(ROME) if it.get("exit_time") else None
+        signer = it.get("signed_by") or ""
+        if exited:
+            firma = f"Firma digitale: {signer}"
+        elif it.get("exit_missing"):
+            firma = f"{signer} (uscita non firmata)"
+        else:
+            firma = f"{signer} (ancora dentro)"
+        add_row([
+            entered.strftime("%d/%m/%Y"), it.get("cognome"), it.get("nome"), it.get("class_name"),
+            entered.strftime("%H:%M"), exited.strftime("%H:%M") if exited else "", it.get("activity"), firma,
+        ])
+    for _ in range(max(0, 12 - len(items))):  # righe vuote come sul foglio cartaceo
+        add_row([""] * 8)
+
+    # Anno scolastico nell'intestazione (es. 2026.2027), calcolato dalla data del primo accesso
+    ref = datetime.fromisoformat(items[0]["entry_time"]).astimezone(ROME) if items else datetime.now(ROME)
+    start_year = ref.year if ref.month >= 9 else ref.year - 1
+    for section in doc.sections:
+        for node in section.header._element.iter(qn("w:t")):
+            if node.text and re.fullmatch(r"\d{4}[./]\d{4}", node.text.strip()):
+                node.text = f"{start_year}.{start_year + 1}"
+
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    await log_event(current_user, "registro", "Esportazione registro accessi (Word)", f"{len(items)} righe")
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": 'attachment; filename="registro_accessi_laboratorio.docx"'},
+    )
+
+@api_router.delete("/lab/access/{access_id}")
+async def lab_access_delete(access_id: str, current_user: dict = Depends(require_admin)):
+    old = await db.lab_access.find_one({"access_id": access_id}, {"_id": 0})
+    result = await db.lab_access.delete_one({"access_id": access_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Riga non trovata")
+    await log_event(current_user, "laboratorio", "Riga registro accessi eliminata",
+                    f"{(old or {}).get('cognome')} {(old or {}).get('nome')} del {(old or {}).get('entry_time', '')[:10]}")
+    return {"message": "Riga eliminata"}
+
+# ============== FOTO STRUMENTI DA EXCEL ==============
+
+MAX_IMAGE_BYTES = 8 * 1024 * 1024   # per singola foto
+MAX_XLSX_BYTES = 40 * 1024 * 1024   # per file Excel
+
+def _process_image(raw: bytes):
+    """Ridimensiona e comprime la foto (JPEG, max 900 px). Ritorna (jpeg, miniatura base64)."""
+    from PIL import Image, ImageOps
+    Image.MAX_IMAGE_PIXELS = 50_000_000
+    if len(raw) > MAX_IMAGE_BYTES:
+        raise ValueError("Foto troppo pesante (massimo 8 MB)")
+    img = Image.open(io.BytesIO(raw))
+    img = ImageOps.exif_transpose(img)
+    if img.mode in ("RGBA", "LA", "P"):
+        img = img.convert("RGBA")
+        background = Image.new("RGB", img.size, (255, 255, 255))
+        background.paste(img, mask=img.split()[-1])
+        img = background
+    else:
+        img = img.convert("RGB")
+    img.thumbnail((900, 900))
+    out = io.BytesIO()
+    img.save(out, "JPEG", quality=82, optimize=True)
+    thumb = img.copy()
+    thumb.thumbnail((72, 72))
+    tout = io.BytesIO()
+    thumb.save(tout, "JPEG", quality=70)
+    return out.getvalue(), "data:image/jpeg;base64," + base64.b64encode(tout.getvalue()).decode("ascii")
+
+def _local(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+def _cell_ref_row(ref: str) -> int:
+    return int(re.sub(r"[A-Za-z]+", "", ref))
+
+def _extract_in_cell_images(content: bytes) -> dict:
+    """Foto inserite 'nella cella' (Excel 365): ritorna {numero riga: bytes}. Se non ce ne sono, {}."""
+    result = {}
+    try:
+        z = zipfile.ZipFile(io.BytesIO(content))
+        names = set(z.namelist())
+        needed = ["xl/metadata.xml", "xl/richData/rdrichvalue.xml", "xl/richData/richValueRel.xml",
+                  "xl/richData/_rels/richValueRel.xml.rels"]
+        if not all(n in names for n in needed):
+            return {}
+
+        # struttura dei valori ricchi: in che posizione c'è l'indice dell'immagine
+        key_pos = {}
+        if "xl/richData/rdrichvaluestructure.xml" in names:
+            structs = [e for e in ET.fromstring(z.read("xl/richData/rdrichvaluestructure.xml")) if _local(e.tag) == "s"]
+            for si, st in enumerate(structs):
+                for ki, k in enumerate([c for c in st if _local(c.tag) == "k"]):
+                    if k.get("n") == "_rvRel:LocalImageIdentifier":
+                        key_pos[si] = ki
+
+        rich_values = [e for e in ET.fromstring(z.read("xl/richData/rdrichvalue.xml")) if _local(e.tag) == "rv"]
+        rels_root = ET.fromstring(z.read("xl/richData/richValueRel.xml"))
+        rel_ids = [e.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id")
+                   for e in rels_root if _local(e.tag) == "rel"]
+        rel_targets = {}
+        for r in ET.fromstring(z.read("xl/richData/_rels/richValueRel.xml.rels")):
+            target = r.get("Target", "")
+            target = target.lstrip("/")
+            if target.startswith("../"):
+                target = "xl/" + target[3:]
+            elif not target.startswith("xl/"):
+                target = "xl/richData/" + target
+            rel_targets[r.get("Id")] = target
+
+        meta = ET.fromstring(z.read("xl/metadata.xml"))
+        future_rvb = []   # indice del valore ricco per ogni bk di futureMetadata
+        value_meta = []   # indice del bk di futureMetadata per ogni valueMetadata (1-based nel foglio)
+        for e in meta:
+            if _local(e.tag) == "futureMetadata":
+                for bk in e:
+                    i = None
+                    for x in bk.iter():
+                        if _local(x.tag) == "rvb":
+                            i = int(x.get("i"))
+                    future_rvb.append(i)
+            elif _local(e.tag) == "valueMetadata":
+                for bk in e:
+                    rc = [x for x in bk if _local(x.tag) == "rc"]
+                    value_meta.append(int(rc[0].get("v")) if rc else None)
+
+        # primo foglio della cartella di lavoro
+        wb_xml = ET.fromstring(z.read("xl/workbook.xml"))
+        first_sheet = [e for e in wb_xml.iter() if _local(e.tag) == "sheet"][0]
+        rid = first_sheet.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id")
+        sheet_path = None
+        for r in ET.fromstring(z.read("xl/_rels/workbook.xml.rels")):
+            if r.get("Id") == rid:
+                t = r.get("Target", "").lstrip("/")
+                sheet_path = t if t.startswith("xl/") else "xl/" + t
+        if not sheet_path or sheet_path not in names:
+            return {}
+
+        for c in ET.fromstring(z.read(sheet_path)).iter():
+            if _local(c.tag) != "c" or c.get("vm") is None:
+                continue
+            vm = int(c.get("vm")) - 1
+            if vm < 0 or vm >= len(value_meta) or value_meta[vm] is None:
+                continue
+            fi = value_meta[vm]
+            if fi >= len(future_rvb) or future_rvb[fi] is None or future_rvb[fi] >= len(rich_values):
+                continue
+            rv = rich_values[future_rvb[fi]]
+            vals = [v for v in rv if _local(v.tag) == "v"]
+            pos = key_pos.get(int(rv.get("s", "0")), 0)
+            img_index = int(vals[pos].text)
+            if img_index >= len(rel_ids) or rel_ids[img_index] not in rel_targets:
+                continue
+            target = rel_targets[rel_ids[img_index]]
+            if target in names:
+                result.setdefault(_cell_ref_row(c.get("r")), z.read(target))
+    except Exception:
+        logger.exception("Lettura foto nelle celle non riuscita")
+        return {}
+    return result
+
+def _parse_image_sheet(content: bytes) -> list:
+    """Legge l'Excel delle foto: una riga per strumento (colonna Matricola) con foto incollata o URL."""
+    from openpyxl import load_workbook
+    if len(content) > MAX_XLSX_BYTES:
+        raise HTTPException(status_code=400, detail="File troppo grande (massimo 40 MB)")
+    try:
+        wb = load_workbook(io.BytesIO(content), data_only=True)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Il file non è un Excel valido (.xlsx)")
+    ws = wb.worksheets[0]
+
+    col_matricola = col_url = col_brand = None
+    header = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None) or ()
+    for idx, title in enumerate(header):
+        t = (str(title).strip().lower() if title is not None else "")
+        if t in ("matricola", "seriale", "numero di serie") and col_matricola is None:
+            col_matricola = idx
+        if t.startswith("url") and col_url is None:
+            col_url = idx
+        if t in ("marca", "brand") and col_brand is None:
+            col_brand = idx
+    if col_matricola is None:
+        raise HTTPException(status_code=400, detail="Colonna obbligatoria mancante: Matricola")
+
+    # foto "sopra le celle": agganciate alla riga in cui si trova l'angolo in alto a sinistra
+    floating = {}
+    for img in getattr(ws, "_images", []):
+        try:
+            row = img.anchor._from.row + 1
+            col = img.anchor._from.col
+            if row not in floating or col < floating[row][0]:
+                floating[row] = (col, img._data())
+        except Exception:
+            continue
+    in_cell = _extract_in_cell_images(content)
+
+    rows = []
+    for row_number, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+        matricola = _cell_to_text(row[col_matricola]) if col_matricola < len(row) else None
+        url = _cell_to_text(row[col_url]) if col_url is not None and col_url < len(row) else None
+        brand = _cell_to_text(row[col_brand]) if col_brand is not None and col_brand < len(row) else None
+        raw = floating[row_number][1] if row_number in floating else in_cell.get(row_number)
+        if not matricola and not raw and not url and not brand:
+            continue
+        if len(rows) >= 2000:
+            raise HTTPException(status_code=400, detail="Troppe righe (massimo 2000)")
+        rows.append({"row": row_number, "matricola": matricola, "raw": raw, "url": url, "brand": brand})
+    wb.close()
+    return rows
+
+async def _evaluate_image_rows(rows: list) -> list:
+    """Per ogni riga: controlla matricola, foto e miniatura. Non salva nulla."""
+    matricole = [r["matricola"] for r in rows if r["matricola"]]
+    found = {}
+    if matricole:
+        async for doc in db.instruments.find({"matricola": {"$in": matricole}}, {"_id": 0, "instrument_id": 1, "matricola": 1, "name": 1, "image_url": 1}):
+            found[doc["matricola"]] = doc
+    results, seen = [], set()
+    for r in rows:
+        item = {"row": r["row"], "matricola": r["matricola"], "name": None, "status": "ok", "message": "",
+                "source": None, "thumb": None, "replaces": False, "brand": r.get("brand")}
+        inst = found.get(r["matricola"]) if r["matricola"] else None
+        if not r["matricola"]:
+            item.update(status="error", message="Matricola mancante")
+        elif not inst:
+            item.update(status="not_found", message="Matricola non presente tra gli strumenti")
+        elif r["matricola"] in seen:
+            item.update(status="error", message="Matricola ripetuta nel file", name=inst.get("name"))
+        elif not r["raw"] and not r["url"] and not r.get("brand"):
+            item.update(status="no_image", message="Nessuna foto né marca in questa riga", name=inst.get("name"))
+        elif not r["raw"] and not r["url"]:
+            item.update(name=inst.get("name"), source="marca")
+            seen.add(r["matricola"])
+        else:
+            item["name"] = inst.get("name")
+            item["replaces"] = bool(inst.get("image_url"))
+            if not r["raw"] and not r["url"]:
+                pass
+            elif r["raw"]:
+                try:
+                    _, thumb = _process_image(r["raw"])
+                    item.update(source="foto", thumb=thumb)
+                except Exception as e:
+                    item.update(status="error", message=f"Foto non leggibile: {e}")
+            else:
+                if re.match(r"^https?://", r["url"], re.I):
+                    item.update(source="url", thumb=r["url"])
+                else:
+                    item.update(status="error", message="L'URL deve iniziare con http:// o https://")
+            if item["status"] == "ok":
+                seen.add(r["matricola"])
+        results.append(item)
+    return results
+
+@api_router.get("/instruments/import-images/template")
+async def import_images_template(current_user: dict = Depends(require_admin_or_technician)):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Foto strumenti"
+    ws.append(["Matricola", "Foto", "URL immagine (alternativa alla foto)", "Marca", "Nome strumento (solo per orientarti)"])
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="1E3A8A")
+        cell.alignment = Alignment(wrap_text=True, vertical="center")
+    instruments = await db.instruments.find({}, {"_id": 0, "matricola": 1, "name": 1, "brand": 1}).sort("name", 1).to_list(5000)
+    for it in instruments:
+        ws.append([it.get("matricola"), None, None, it.get("brand"), it.get("name")])
+    for i in range(2, len(instruments) + 2):
+        ws.row_dimensions[i].height = 90
+        ws[f"A{i}"].number_format = "@"
+        ws[f"A{i}"].alignment = Alignment(vertical="center")
+        ws[f"D{i}"].alignment = Alignment(vertical="center")
+        ws[f"E{i}"].alignment = Alignment(vertical="center", wrap_text=True)
+    for col, w in zip("ABCDE", [18, 22, 40, 20, 36]):
+        ws.column_dimensions[col].width = w
+    ws.row_dimensions[1].height = 32
+    ws.freeze_panes = "A2"
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="modello_foto_strumenti.xlsx"'},
+    )
+
+@api_router.post("/instruments/import-images/preview")
+async def import_images_preview(file: UploadFile = File(...), current_user: dict = Depends(require_admin_or_technician)):
+    rows = _parse_image_sheet(await file.read())
+    results = await _evaluate_image_rows(rows)
+    counts = {k: sum(1 for r in results if r["status"] == k) for k in ("ok", "not_found", "no_image", "error")}
+    return {"rows": results, "counts": counts}
+
+@api_router.post("/instruments/import-images/confirm")
+async def import_images_confirm(file: UploadFile = File(...), current_user: dict = Depends(require_admin_or_technician)):
+    rows = _parse_image_sheet(await file.read())
+    results = await _evaluate_image_rows(rows)
+    by_row = {r["row"]: r for r in rows}
+    imported, failed = 0, 0
+    for res in results:
+        if res["status"] != "ok":
+            continue
+        src = by_row[res["row"]]
+        inst = await db.instruments.find_one({"matricola": res["matricola"]}, {"_id": 0, "instrument_id": 1})
+        if not inst:
+            failed += 1
+            continue
+        try:
+            updates = {}
+            if src.get("brand"):
+                updates["brand"] = src["brand"][:80]
+            if not src["raw"] and not src["url"]:
+                await db.instruments.update_one({"instrument_id": inst["instrument_id"]}, {"$set": updates})
+                imported += 1
+                continue
+            if src["raw"]:
+                jpeg, _ = _process_image(src["raw"])
+                image_id = f"img_{uuid.uuid4().hex[:24]}"
+                await db.instrument_images.delete_many({"instrument_id": inst["instrument_id"]})
+                await db.instrument_images.insert_one({
+                    "image_id": image_id,
+                    "instrument_id": inst["instrument_id"],
+                    "matricola": res["matricola"],
+                    "content_type": "image/jpeg",
+                    "data": jpeg,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                })
+                image_url = f"/api/images/{image_id}"
+            else:
+                await db.instrument_images.delete_many({"instrument_id": inst["instrument_id"]})
+                image_url = src["url"]
+            updates["image_url"] = image_url
+            await db.instruments.update_one({"instrument_id": inst["instrument_id"]}, {"$set": updates})
+            imported += 1
+        except Exception:
+            logger.exception("Importazione foto fallita per %s", res["matricola"])
+            failed += 1
+    await log_event(current_user, "strumenti", "Importazione foto/marche da Excel", f"{imported} righe importate, {failed} non riuscite")
+    return {"imported": imported, "failed": failed}
+
+@api_router.get("/images/{image_id}")
+async def get_image(image_id: str):
+    """Foto dello strumento. L'indirizzo contiene un codice casuale non indovinabile."""
+    doc = await db.instrument_images.find_one({"image_id": image_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Immagine non trovata")
+    return Response(
+        content=bytes(doc["data"]),
+        media_type=doc.get("content_type", "image/jpeg"),
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+# ============== NEWS ==============
+
+@api_router.get("/news/public")
+async def get_public_news(limit: int = 3):
+    """News visibili nella pagina di accesso (senza login): solo quelle segnate come pubbliche, senza autore."""
+    items = await db.news.find({"public": True}, {"_id": 0}).sort("created_at", -1).to_list(max(1, min(limit, 10)))
+    return [
+        {"news_id": n["news_id"], "title": n["title"], "body": n["body"],
+         "important": n.get("important", False), "created_at": n["created_at"]}
+        for n in items
+    ]
+
+@api_router.get("/news")
+async def get_news(limit: int = 20, current_user: dict = Depends(get_current_user)):
+    items = await db.news.find({}, {"_id": 0}).sort("created_at", -1).to_list(max(1, min(limit, 100)))
+    return items
+
+@api_router.post("/news")
+async def create_news(data: NewsCreate, current_user: dict = Depends(require_admin_or_technician)):
+    title, body = data.title.strip(), data.body.strip()
+    if not title or not body:
+        raise HTTPException(status_code=400, detail="Titolo e testo sono obbligatori")
+    item = {
+        "news_id": f"news_{uuid.uuid4().hex[:12]}",
+        "title": title[:150],
+        "body": body[:3000],
+        "important": data.important,
+        "public": data.public,
+        "author_name": current_user.get("name"),
+        "author_id": current_user.get("user_id"),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.news.insert_one(item)
+    item.pop("_id", None)
+    await log_event(current_user, "news", "News pubblicata", item["title"] + (" (anche nella pagina di accesso)" if item["public"] else ""))
+    return item
+
+@api_router.delete("/news/{news_id}")
+async def delete_news(news_id: str, current_user: dict = Depends(require_admin_or_technician)):
+    old = await db.news.find_one({"news_id": news_id}, {"_id": 0})
+    result = await db.news.delete_one({"news_id": news_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="News non trovata")
+    await log_event(current_user, "news", "News eliminata", (old or {}).get("title", news_id))
+    return {"message": "News eliminata"}
+
+# ============== LOG (solo admin, sola lettura) ==============
+
+def _logs_query(search: Optional[str], category: Optional[str]) -> dict:
+    query = {}
+    if category:
+        query["category"] = category
+    if search:
+        rx = {"$regex": re.escape(search), "$options": "i"}
+        query["$or"] = [{"details": rx}, {"action": rx}, {"user_name": rx}, {"user_email": rx}]
+    return query
+
+@api_router.get("/logs")
+async def get_logs(
+    search: Optional[str] = None,
+    category: Optional[str] = None,
+    limit: int = 100,
+    skip: int = 0,
+    current_user: dict = Depends(require_admin),
+):
+    query = _logs_query(search, category)
+    total = await db.logs.count_documents(query)
+    items = await db.logs.find(query, {"_id": 0}).sort("timestamp", -1).skip(max(skip, 0)).to_list(max(1, min(limit, 500)))
+    return {"items": items, "total": total}
+
+@api_router.get("/logs/export")
+async def export_logs(
+    search: Optional[str] = None,
+    category: Optional[str] = None,
+    current_user: dict = Depends(require_admin),
+):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    from zoneinfo import ZoneInfo
+    rome = ZoneInfo("Europe/Rome")
+    items = await db.logs.find(_logs_query(search, category), {"_id": 0}).sort("timestamp", -1).to_list(20000)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Registro"
+    ws.append(["Data", "Ora", "Utente", "Email", "Categoria", "Azione", "Dettagli"])
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="1E3A8A")
+    for it in items:
+        try:
+            dt = datetime.fromisoformat(it["timestamp"]).astimezone(rome)
+            d, t = dt.strftime("%d/%m/%Y"), dt.strftime("%H:%M:%S")
+        except Exception:
+            d, t = it.get("timestamp", ""), ""
+        ws.append([d, t, it.get("user_name") or "-", it.get("user_email") or "-", it.get("category"), it.get("action"), it.get("details")])
+    for col, w in zip("ABCDEFG", [12, 10, 24, 30, 14, 26, 70]):
+        ws.column_dimensions[col].width = w
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    await log_event(current_user, "registro", "Esportazione registro", f"{len(items)} righe")
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="registro_attivita.xlsx"'},
+    )
+
+# ============== FILAMENTI (Bambu Lab) ==============
+
+FILAMENT_CATALOG = [
+    {"group": "PLA", "materials": ["PLA Basic", "PLA Matte", "PLA Silk+", "PLA Silk Multi-Color", "PLA Sparkle", "PLA Metal", "PLA Marble", "PLA Galaxy", "PLA Glow", "PLA Wood", "PLA Translucent", "PLA Lite", "PLA Aero", "PLA Tough+", "PLA-CF"]},
+    {"group": "PETG", "materials": ["PETG HF", "PETG Translucent", "PETG-CF"]},
+    {"group": "ABS / ASA", "materials": ["ABS", "ABS-GF", "ASA", "ASA Aero"]},
+    {"group": "Tecnici", "materials": ["PC", "PC FR", "PA6-CF", "PA6-GF", "PAHT-CF", "PET-CF", "PPA-CF"]},
+    {"group": "Flessibili", "materials": ["TPU 95A HF", "TPU 85A", "TPU 90A", "TPU for AMS"]},
+    {"group": "Supporti", "materials": ["Support for PLA", "Support for PETG", "Support for ABS", "PVA"]},
+]
+FILAMENT_STATES = ("sealed", "open", "finished")
+
+class FilamentProductIn(BaseModel):
+    material: str
+    color_name: str
+    color_hex: Optional[str] = None
+    brand: Optional[str] = "Bambu Lab"
+    spool_size_g: int = 1000
+    min_stock: int = 1          # bobine chiuse minime da tenere in magazzino
+    notes: Optional[str] = None
+
+class FilamentProductUpdate(BaseModel):
+    material: Optional[str] = None
+    color_name: Optional[str] = None
+    color_hex: Optional[str] = None
+    brand: Optional[str] = None
+    spool_size_g: Optional[int] = None
+    min_stock: Optional[int] = None
+    notes: Optional[str] = None
+
+class SpoolsAdd(BaseModel):
+    count: int = 1
+    state: str = "sealed"
+    location: Optional[str] = None
+
+class SpoolUpdate(BaseModel):
+    state: Optional[str] = None
+    remaining_g: Optional[int] = None
+    location: Optional[str] = None
+
+def _clean_hex(v):
+    v = (v or "").strip()
+    return v if re.match(r"^#[0-9a-fA-F]{6}$", v) else None
+
+async def _filaments_overview():
+    products = await db.filament_products.find({}, {"_id": 0}).sort([("material", 1), ("color_name", 1)]).to_list(2000)
+    spools = await db.filament_spools.find({"state": {"$ne": "finished"}}, {"_id": 0}).to_list(20000)
+    by_product = {}
+    for sp in spools:
+        by_product.setdefault(sp["product_id"], []).append(sp)
+    out = []
+    for p in products:
+        sl = by_product.get(p["product_id"], [])
+        sealed = [s for s in sl if s["state"] == "sealed"]
+        opened = [s for s in sl if s["state"] == "open"]
+        p["sealed"] = len(sealed)
+        p["open"] = len(opened)
+        p["open_remaining_g"] = sum(int(s.get("remaining_g") or 0) for s in opened)
+        p["total_g"] = p["sealed"] * int(p.get("spool_size_g") or 1000) + p["open_remaining_g"]
+        p["to_reorder"] = max(0, int(p.get("min_stock") or 0) - p["sealed"])
+        p["low"] = p["to_reorder"] > 0
+        p["spools"] = sorted(sl, key=lambda s: (s["state"] != "open", s.get("created_at", "")))
+        out.append(p)
+    return out
+
+@api_router.get("/filaments/catalog")
+async def filament_catalog(current_user: dict = Depends(get_current_user)):
+    return FILAMENT_CATALOG
+
+@api_router.get("/filaments")
+async def filaments_list(current_user: dict = Depends(get_current_user)):
+    items = await _filaments_overview()
+    return {
+        "products": items,
+        "summary": {
+            "products": len(items),
+            "sealed": sum(p["sealed"] for p in items),
+            "open": sum(p["open"] for p in items),
+            "to_reorder": sum(1 for p in items if p["low"]),
+        },
+    }
+
+@api_router.post("/filaments")
+async def filament_create(data: FilamentProductIn, current_user: dict = Depends(require_admin_or_technician)):
+    material, color = data.material.strip(), data.color_name.strip()
+    if not material or not color:
+        raise HTTPException(status_code=400, detail="Materiale e colore sono obbligatori")
+    dup = await db.filament_products.find_one({"material": {"$regex": f"^{re.escape(material)}$", "$options": "i"}, "color_name": {"$regex": f"^{re.escape(color)}$", "$options": "i"}}, {"_id": 1})
+    if dup:
+        raise HTTPException(status_code=400, detail="Questo filamento (materiale + colore) esiste già")
+    item = {
+        "product_id": f"fil_{uuid.uuid4().hex[:12]}",
+        "material": material[:60], "color_name": color[:60], "color_hex": _clean_hex(data.color_hex),
+        "brand": (data.brand or "Bambu Lab").strip()[:60], "spool_size_g": max(100, min(data.spool_size_g, 10000)),
+        "min_stock": max(0, min(data.min_stock, 999)), "notes": (data.notes or "").strip()[:300] or None,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.filament_products.insert_one(item)
+    item.pop("_id", None)
+    await log_event(current_user, "filamenti", "Filamento aggiunto", f"{material} - {color}")
+    return item
+
+@api_router.put("/filaments/{product_id}")
+async def filament_update(product_id: str, data: FilamentProductUpdate, current_user: dict = Depends(require_admin_or_technician)):
+    upd = {k: v for k, v in data.model_dump().items() if v is not None}
+    if "color_hex" in upd:
+        upd["color_hex"] = _clean_hex(upd["color_hex"])
+    if "min_stock" in upd:
+        upd["min_stock"] = max(0, min(upd["min_stock"], 999))
+    if "spool_size_g" in upd:
+        upd["spool_size_g"] = max(100, min(upd["spool_size_g"], 10000))
+    old = await db.filament_products.find_one({"product_id": product_id}, {"_id": 0})
+    if not old:
+        raise HTTPException(status_code=404, detail="Filamento non trovato")
+    if upd:
+        await db.filament_products.update_one({"product_id": product_id}, {"$set": upd})
+    await log_event(current_user, "filamenti", "Filamento modificato", f"{old['material']} - {old['color_name']}")
+    return {"message": "ok"}
+
+@api_router.delete("/filaments/{product_id}")
+async def filament_delete(product_id: str, current_user: dict = Depends(require_admin_or_technician)):
+    old = await db.filament_products.find_one({"product_id": product_id}, {"_id": 0})
+    if not old:
+        raise HTTPException(status_code=404, detail="Filamento non trovato")
+    await db.filament_products.delete_one({"product_id": product_id})
+    await db.filament_spools.delete_many({"product_id": product_id})
+    await log_event(current_user, "filamenti", "Filamento eliminato", f"{old['material']} - {old['color_name']}")
+    return {"message": "ok"}
+
+@api_router.post("/filaments/{product_id}/spools")
+async def filament_add_spools(product_id: str, data: SpoolsAdd, current_user: dict = Depends(require_admin_or_technician)):
+    p = await db.filament_products.find_one({"product_id": product_id}, {"_id": 0})
+    if not p:
+        raise HTTPException(status_code=404, detail="Filamento non trovato")
+    if data.state not in ("sealed", "open"):
+        raise HTTPException(status_code=400, detail="Stato non valido")
+    n = max(1, min(data.count, 50))
+    size = int(p.get("spool_size_g") or 1000)
+    for _ in range(n):
+        await db.filament_spools.insert_one({
+            "spool_id": f"spl_{uuid.uuid4().hex[:12]}", "product_id": product_id, "state": data.state,
+            "remaining_g": size, "location": (data.location or "").strip()[:60] or None,
+            "opened_at": datetime.now(timezone.utc).isoformat() if data.state == "open" else None,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+    await log_event(current_user, "filamenti", "Bobine aggiunte", f"{n} x {p['material']} - {p['color_name']} ({'chiuse' if data.state == 'sealed' else 'aperte'})")
+    return {"added": n}
+
+@api_router.put("/filaments/spools/{spool_id}")
+async def filament_update_spool(spool_id: str, data: SpoolUpdate, current_user: dict = Depends(require_admin_or_technician)):
+    sp = await db.filament_spools.find_one({"spool_id": spool_id}, {"_id": 0})
+    if not sp:
+        raise HTTPException(status_code=404, detail="Bobina non trovata")
+    upd = {}
+    if data.state is not None:
+        if data.state not in FILAMENT_STATES:
+            raise HTTPException(status_code=400, detail="Stato non valido")
+        upd["state"] = data.state
+        if data.state == "open" and sp["state"] == "sealed":
+            upd["opened_at"] = datetime.now(timezone.utc).isoformat()
+        if data.state == "finished":
+            upd["remaining_g"] = 0
+    if data.remaining_g is not None:
+        upd["remaining_g"] = max(0, min(data.remaining_g, 10000))
+        if upd["remaining_g"] == 0 and "state" not in upd:
+            upd["state"] = "finished"
+    if data.location is not None:
+        upd["location"] = data.location.strip()[:60] or None
+    if upd:
+        await db.filament_spools.update_one({"spool_id": spool_id}, {"$set": upd})
+    p = await db.filament_products.find_one({"product_id": sp["product_id"]}, {"_id": 0}) or {}
+    await log_event(current_user, "filamenti", "Bobina aggiornata", f"{p.get('material','?')} - {p.get('color_name','?')}: " + ", ".join(f"{k}={v}" for k, v in upd.items() if k != "opened_at"))
+    return {"message": "ok"}
+
+@api_router.delete("/filaments/spools/{spool_id}")
+async def filament_delete_spool(spool_id: str, current_user: dict = Depends(require_admin_or_technician)):
+    r = await db.filament_spools.delete_one({"spool_id": spool_id})
+    if r.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Bobina non trovata")
+    await log_event(current_user, "filamenti", "Bobina eliminata", spool_id)
+    return {"message": "ok"}
+
+@api_router.get("/filaments/export/xlsx")
+async def filaments_export(only_reorder: bool = False, current_user: dict = Depends(get_current_user)):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    items = await _filaments_overview()
+    if only_reorder:
+        items = [p for p in items if p["low"]]
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Da riordinare" if only_reorder else "Magazzino filamenti"
+    ws.append(["Materiale", "Colore", "Marca", "Bobina (g)", "Chiuse", "Aperte", "Residuo aperte (g)", "Scorta minima", "Da riordinare"])
+    for c in ws[1]:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="1E3A8A")
+    for p in items:
+        ws.append([p["material"], p["color_name"], p.get("brand"), p.get("spool_size_g"), p["sealed"], p["open"], p["open_remaining_g"], p.get("min_stock"), p["to_reorder"]])
+    for col, w in zip("ABCDEFGHI", [24, 22, 14, 11, 9, 9, 18, 14, 14]):
+        ws.column_dimensions[col].width = w
+    buf = io.BytesIO()
+    wb.save(buf)
+    name = "filamenti_da_riordinare.xlsx" if only_reorder else "magazzino_filamenti.xlsx"
+    return Response(content=buf.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+# ============== STATS ENDPOINT ==============
+
+@api_router.get("/stats")
+async def get_stats(current_user: dict = Depends(get_current_user)):
+    total_instruments = await db.instruments.count_documents({})
+    available = await db.instruments.count_documents({"status": "available"})
+    in_use = await db.instruments.count_documents({"status": "in_use"})
+    total_users = await db.users.count_documents({})
+    total_movements = await db.movements.count_documents({})
+    
+    return {
+        "total_instruments": total_instruments,
+        "available": available,
+        "in_use": in_use,
+        "total_users": total_users,
+        "total_movements": total_movements
+    }
+
+# ============== CATEGORIES ENDPOINT ==============
+
+@api_router.get("/categories")
+async def get_categories(current_user: dict = Depends(get_current_user)):
+    categories = await db.instruments.distinct("category")
+    return [c for c in categories if c]
+
+# Root endpoint
+@api_router.get("/")
+async def root():
+    return {"message": "ISIS Malignani - Metrology Lab Inventory API"}
+
+# ============== HOME PUBBLICA + RICHIESTE (preventivi / informazioni) ==============
+
+MAIL_TO = os.environ.get("MAIL_TO", "labmet.malignani@gmail.com")
+MAIL_FROM = os.environ.get("MAIL_FROM", MAIL_TO)  # con Brevo deve essere un mittente verificato
+MAIL_FROM_NAME = os.environ.get("MAIL_FROM_NAME", "Sito Laboratorio di Metrologia")
+
+DEFAULT_RESPONSABILI = [
+    {"id": "r_papa", "name": "Francesco Matteo Papa", "role": "Responsabile del progetto e del laboratorio", "photo": None},
+    {"id": "r_giacuzzo", "name": "David Giacuzzo", "role": "Vice responsabile del progetto e responsabile del laboratorio", "photo": None},
+    {"id": "r_busato", "name": "Federico Busato", "role": "Coordinatore del progetto e responsabile del laboratorio", "photo": None},
+]
+DEFAULT_INFO = {
+    "aula": "F.0.01 · MEC LAB",
+    "sede": "ISIS A. Malignani, Udine",
+    "indirizzo": "",
+    "map_query": "ISIS Arturo Malignani Udine",
+    "orari": "",
+}
+
+class ResponsabileIn(BaseModel):
+    name: str
+    role: str = ""
+    photo: Optional[str] = None
+
+class ResponsabiliUpdate(BaseModel):
+    items: List[ResponsabileIn]
+
+class InfoUpdate(BaseModel):
+    aula: str = ""
+    sede: str = ""
+    indirizzo: str = ""
+    map_query: str = ""
+    orari: str = ""
+
+class RequestCreate(BaseModel):
+    kind: str = "info"  # "preventivo" | "info"
+    name: str
+    email: EmailStr
+    phone: Optional[str] = None
+    organization: Optional[str] = None
+    message: str
+    website: Optional[str] = None  # campo trappola anti-spam: le persone non lo compilano
+
+class RequestUpdate(BaseModel):
+    status: Optional[str] = None  # nuova | in_corso | chiusa
+    note: Optional[str] = None
+
+async def _get_site_content() -> dict:
+    doc = await db.site_content.find_one({"key": "home"}, {"_id": 0}) or {}
+    info = dict(DEFAULT_INFO)
+    info.update(doc.get("info") or {})
+    return {
+        "responsabili": doc["responsabili"] if "responsabili" in doc else DEFAULT_RESPONSABILI,
+        "foto": doc.get("foto", []),
+        "info": info,
+    }
+
+@api_router.get("/site")
+async def get_site_public():
+    """Contenuti della home pubblica (nessun login)."""
+    data = await _get_site_content()
+    try:
+        data["stats"] = {"strumenti": await db.instruments.count_documents({})}
+    except Exception:
+        data["stats"] = {"strumenti": 0}
+    return data
+
+@api_router.put("/site/responsabili")
+async def update_responsabili(data: ResponsabiliUpdate, current_user: dict = Depends(require_admin_or_technician)):
+    if len(data.items) > 12:
+        raise HTTPException(status_code=400, detail="Massimo 12 persone")
+    items = []
+    for i, r in enumerate(data.items):
+        name = r.name.strip()
+        if not name:
+            continue
+        photo = (r.photo or "").strip() or None
+        if photo and not (photo.startswith("/api/images/") or photo.startswith("https://")):
+            raise HTTPException(status_code=400, detail="Indirizzo foto non valido")
+        items.append({"id": f"r_{uuid.uuid4().hex[:8]}", "name": name[:80], "role": r.role.strip()[:120], "photo": photo})
+    await db.site_content.update_one({"key": "home"}, {"$set": {"responsabili": items}}, upsert=True)
+    await log_event(current_user, "home", "Responsabili aggiornati", f"{len(items)} persone")
+    return {"responsabili": items}
+
+@api_router.put("/site/info")
+async def update_site_info(data: InfoUpdate, current_user: dict = Depends(require_admin_or_technician)):
+    info = {
+        "aula": data.aula.strip()[:80], "sede": data.sede.strip()[:120], "indirizzo": data.indirizzo.strip()[:160],
+        "map_query": data.map_query.strip()[:200], "orari": data.orari.strip()[:200],
+    }
+    await db.site_content.update_one({"key": "home"}, {"$set": {"info": info}}, upsert=True)
+    await log_event(current_user, "home", "Dove si trova aggiornato", info["aula"])
+    return {"info": info}
+
+async def _store_site_image(raw: bytes, max_side: int = 1600, square: int = 0) -> str:
+    from PIL import Image, ImageOps
+    try:
+        img = Image.open(io.BytesIO(raw))
+        img = ImageOps.exif_transpose(img).convert("RGB")
+    except Exception:
+        raise HTTPException(status_code=400, detail="File non valido: carica una foto JPG, PNG o WebP")
+    if square:
+        img = ImageOps.fit(img, (square, square))
+    else:
+        img.thumbnail((max_side, max_side))
+    out = io.BytesIO()
+    img.save(out, format="JPEG", quality=85, optimize=True)
+    image_id = f"site_{uuid.uuid4().hex[:16]}"
+    await db.instrument_images.insert_one({
+        "image_id": image_id, "instrument_id": None, "content_type": "image/jpeg",
+        "data": out.getvalue(), "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    return image_id
+
+@api_router.post("/site/photos")
+async def upload_site_photo(file: UploadFile = File(...), caption: str = Form(""), current_user: dict = Depends(require_admin_or_technician)):
+    raw = await file.read()
+    if len(raw) > 12 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Foto troppo grande (massimo 12 MB)")
+    current = await _get_site_content()
+    if len(current["foto"]) >= 24:
+        raise HTTPException(status_code=400, detail="Massimo 24 foto: eliminane qualcuna")
+    image_id = await _store_site_image(raw)
+    photo = {"photo_id": image_id, "url": f"/api/images/{image_id}", "caption": caption.strip()[:140]}
+    await db.site_content.update_one({"key": "home"}, {"$push": {"foto": photo}}, upsert=True)
+    await log_event(current_user, "home", "Foto aggiunta alla home", photo["caption"] or image_id)
+    return photo
+
+@api_router.post("/site/person-photo")
+async def upload_person_photo(file: UploadFile = File(...), current_user: dict = Depends(require_admin_or_technician)):
+    raw = await file.read()
+    if len(raw) > 12 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Foto troppo grande (massimo 12 MB)")
+    image_id = await _store_site_image(raw, square=400)
+    return {"url": f"/api/images/{image_id}"}
+
+@api_router.delete("/site/photos/{photo_id}")
+async def delete_site_photo(photo_id: str, current_user: dict = Depends(require_admin_or_technician)):
+    res = await db.site_content.update_one({"key": "home"}, {"$pull": {"foto": {"photo_id": photo_id}}})
+    if res.modified_count == 0:
+        raise HTTPException(status_code=404, detail="Foto non trovata")
+    await db.instrument_images.delete_one({"image_id": photo_id})
+    await log_event(current_user, "home", "Foto eliminata dalla home", photo_id)
+    return {"message": "Foto eliminata"}
+
+# ---- invio email (via HTTPS: su Render gratis le porte SMTP sono bloccate) ----
+
+def _esc(t: str) -> str:
+    return (t or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+async def send_mail(subject: str, text: str, html: str, reply_to_email: str = None, reply_to_name: str = None):
+    """Invia una mail a MAIL_TO. Ritorna (True, "") oppure (False, motivo). Non solleva eccezioni."""
+    brevo_key = os.environ.get("BREVO_API_KEY")
+    resend_key = os.environ.get("RESEND_API_KEY")
+    try:
+        if brevo_key:
+            payload = {
+                "sender": {"name": MAIL_FROM_NAME, "email": MAIL_FROM},
+                "to": [{"email": MAIL_TO}],
+                "subject": subject, "textContent": text, "htmlContent": html,
+            }
+            if reply_to_email:
+                payload["replyTo"] = {"email": reply_to_email, "name": (reply_to_name or reply_to_email)[:80]}
+            async with httpx.AsyncClient(timeout=15) as c:
+                r = await c.post("https://api.brevo.com/v3/smtp/email", json=payload,
+                                 headers={"api-key": brevo_key, "accept": "application/json"})
+            if r.status_code in (200, 201, 202):
+                return True, ""
+            return False, f"Brevo {r.status_code}: {r.text[:200]}"
+        if resend_key:
+            payload = {"from": f"{MAIL_FROM_NAME} <{os.environ.get('RESEND_FROM', 'onboarding@resend.dev')}>",
+                       "to": [MAIL_TO], "subject": subject, "text": text, "html": html}
+            if reply_to_email:
+                payload["reply_to"] = reply_to_email
+            async with httpx.AsyncClient(timeout=15) as c:
+                r = await c.post("https://api.resend.com/emails", json=payload,
+                                 headers={"Authorization": f"Bearer {resend_key}"})
+            if r.status_code in (200, 201, 202):
+                return True, ""
+            return False, f"Resend {r.status_code}: {r.text[:200]}"
+        smtp_user, smtp_pass = os.environ.get("SMTP_USER"), os.environ.get("SMTP_PASSWORD")
+        if smtp_user and smtp_pass:
+            import smtplib
+            from email.message import EmailMessage
+
+            def _send():
+                msg = EmailMessage()
+                msg["Subject"], msg["From"], msg["To"] = subject, f"{MAIL_FROM_NAME} <{smtp_user}>", MAIL_TO
+                if reply_to_email:
+                    msg["Reply-To"] = reply_to_email
+                msg.set_content(text)
+                msg.add_alternative(html, subtype="html")
+                with smtplib.SMTP_SSL(os.environ.get("SMTP_HOST", "smtp.gmail.com"), int(os.environ.get("SMTP_PORT", "465")), timeout=15) as s:
+                    s.login(smtp_user, smtp_pass)
+                    s.send_message(msg)
+            await asyncio.to_thread(_send)
+            return True, ""
+        return False, "Invio email non configurato (manca BREVO_API_KEY)"
+    except Exception as e:
+        logger.exception("Invio email fallito")
+        return False, f"{type(e).__name__}: {str(e)[:200]}"
+
+def _request_mail(doc: dict):
+    kind = "Richiesta di preventivo" if doc["kind"] == "preventivo" else "Richiesta di informazioni"
+    subject = f"[Metrologia Lab] {kind} da {doc['name']}"
+    lines = [kind, "", f"Nome: {doc['name']}", f"Email: {doc['email']}"]
+    if doc.get("phone"): lines.append(f"Telefono: {doc['phone']}")
+    if doc.get("organization"): lines.append(f"Scuola / azienda: {doc['organization']}")
+    lines += ["", "Messaggio:", doc["message"], "", "Puoi rispondere direttamente a questa mail: arriverà alla persona che ha scritto.",
+              "Tutte le richieste sono anche nella pagina «Richieste» del sito."]
+    text = "\n".join(lines)
+    rows = "".join(
+        f"<tr><td style='padding:4px 12px 4px 0;color:#64748b'>{k}</td><td style='padding:4px 0'><b>{_esc(v)}</b></td></tr>"
+        for k, v in [("Nome", doc["name"]), ("Email", doc["email"]), ("Telefono", doc.get("phone")), ("Scuola / azienda", doc.get("organization"))] if v
+    )
+    html = (f"<div style='font-family:Arial,sans-serif;max-width:560px'><h2 style='color:#0b1530'>{kind}</h2>"
+            f"<table>{rows}</table><p style='color:#64748b;margin:16px 0 4px'>Messaggio</p>"
+            f"<div style='background:#f1f5f9;border-radius:8px;padding:12px;white-space:pre-wrap'>{_esc(doc['message'])}</div>"
+            f"<p style='color:#94a3b8;font-size:12px;margin-top:16px'>Puoi rispondere a questa mail: arriva a {_esc(doc['name'])}. "
+            f"Le richieste sono anche nella pagina «Richieste» del sito.</p></div>")
+    return subject, text, html
+
+_rate = {}  # ip -> [timestamp, ...]
+
+def _rate_limited(ip: str, limit: int = 5, window: int = 3600) -> bool:
+    now = datetime.now(timezone.utc).timestamp()
+    hits = [t for t in _rate.get(ip, []) if now - t < window]
+    if len(hits) >= limit:
+        _rate[ip] = hits
+        return True
+    hits.append(now)
+    _rate[ip] = hits
+    if len(_rate) > 5000:
+        _rate.clear()
+    return False
+
+@api_router.post("/requests")
+async def create_request(data: RequestCreate, request: Request):
+    """Richiesta pubblica di preventivo o informazioni: viene salvata e inviata subito per email."""
+    if data.website:  # robot
+        return {"ok": True}
+    fwd = request.headers.get("x-forwarded-for", "")
+    ip = (fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "?"))
+    if _rate_limited(ip):
+        raise HTTPException(status_code=429, detail="Hai inviato troppe richieste: riprova tra un po'")
+    name, message = data.name.strip(), data.message.strip()
+    if len(name) < 2 or len(message) < 5:
+        raise HTTPException(status_code=400, detail="Scrivi il tuo nome e un messaggio")
+    kind = "preventivo" if data.kind == "preventivo" else "info"
+    doc = {
+        "request_id": f"req_{uuid.uuid4().hex[:12]}",
+        "kind": kind, "name": name[:100], "email": str(data.email).lower(),
+        "phone": (data.phone or "").strip()[:40] or None,
+        "organization": (data.organization or "").strip()[:120] or None,
+        "message": message[:4000],
+        "status": "nuova", "note": "",
+        "email_sent": False, "email_error": None,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.requests.insert_one(dict(doc))
+    subject, text, html = _request_mail(doc)
+    ok, err = await send_mail(subject, text, html, doc["email"], doc["name"])
+    await db.requests.update_one({"request_id": doc["request_id"]}, {"$set": {"email_sent": ok, "email_error": None if ok else err}})
+    await log_event(None, "richieste", "Nuova richiesta " + ("di preventivo" if kind == "preventivo" else "di informazioni"),
+                    f"{doc['name']} <{doc['email']}> — email {'inviata' if ok else 'NON inviata: ' + str(err)}")
+    return {"ok": True}
+
+@api_router.get("/requests")
+async def list_requests(status: Optional[str] = None, current_user: dict = Depends(require_admin_or_technician)):
+    query = {"status": status} if status in ("nuova", "in_corso", "chiusa") else {}
+    items = await db.requests.find(query, {"_id": 0}).sort("created_at", -1).to_list(500)
+    counts = {"nuova": 0, "in_corso": 0, "chiusa": 0}
+    async for r in db.requests.find({}, {"_id": 0, "status": 1}):
+        counts[r.get("status", "nuova")] = counts.get(r.get("status", "nuova"), 0) + 1
+    return {"items": items, "counts": counts}
+
+@api_router.get("/requests/count")
+async def count_new_requests(current_user: dict = Depends(require_admin_or_technician)):
+    return {"nuove": await db.requests.count_documents({"status": "nuova"})}
+
+@api_router.put("/requests/{request_id}")
+async def update_request(request_id: str, data: RequestUpdate, current_user: dict = Depends(require_admin_or_technician)):
+    updates = {}
+    if data.status is not None:
+        if data.status not in ("nuova", "in_corso", "chiusa"):
+            raise HTTPException(status_code=400, detail="Stato non valido")
+        updates["status"] = data.status
+    if data.note is not None:
+        updates["note"] = data.note.strip()[:1000]
+    if not updates:
+        raise HTTPException(status_code=400, detail="Niente da aggiornare")
+    res = await db.requests.update_one({"request_id": request_id}, {"$set": updates})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Richiesta non trovata")
+    await log_event(current_user, "richieste", "Richiesta aggiornata", f"{request_id}: " + ", ".join(f"{k}={v}" for k, v in updates.items() if k != "note") + (" (nota)" if "note" in updates else ""))
+    return await db.requests.find_one({"request_id": request_id}, {"_id": 0})
+
+@api_router.post("/requests/{request_id}/resend")
+async def resend_request(request_id: str, current_user: dict = Depends(require_admin_or_technician)):
+    doc = await db.requests.find_one({"request_id": request_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Richiesta non trovata")
+    subject, text, html = _request_mail(doc)
+    ok, err = await send_mail(subject, text, html, doc["email"], doc["name"])
+    await db.requests.update_one({"request_id": request_id}, {"$set": {"email_sent": ok, "email_error": None if ok else err}})
+    if not ok:
+        raise HTTPException(status_code=502, detail=err)
+    return {"ok": True}
+
+@api_router.delete("/requests/{request_id}")
+async def delete_request(request_id: str, current_user: dict = Depends(require_admin)):
+    res = await db.requests.delete_one({"request_id": request_id})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Richiesta non trovata")
+    await log_event(current_user, "richieste", "Richiesta eliminata", request_id)
+    return {"message": "Richiesta eliminata"}
+
+# ============== LETTORE NFC DEL PC + TELEFONI AUTORIZZATI: ingresso/uscita con la tessera ==============
+# Il programma sul PC del laboratorio (bridge/lettore_nfc.py) manda ogni tessera letta a questo indirizzo con la
+# chiave NFC_READER_KEY. Anche un telefono con il login di un amministratore/tecnico puo' mandare le letture
+# (Chrome su Android legge le tessere da solo). La tessera registra ingresso o uscita nel Registro accessi,
+# qualunque dispositivo stia usando la persona per navigare sul sito.
+
+NFC_READER_KEY = os.environ.get("NFC_READER_KEY", "")
+_scan_last = {}  # user_id -> ultimo passaggio (evita doppie letture)
+
+class ScanData(BaseModel):
+    uid: str
+
+def _reader_key_ok(request: Request) -> bool:
+    key = request.headers.get("x-reader-key", "")
+    return bool(NFC_READER_KEY) and hmac.compare_digest(key.encode("utf-8"), NFC_READER_KEY.encode("utf-8"))
+
+def _client_ip(request: Request) -> str:
+    fwd = request.headers.get("x-forwarded-for", "")
+    return fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "?")
+
+async def _touch_reader(**extra):
+    await db.nfc_status.update_one({"key": "pc_reader"}, {"$set": {"last_seen": datetime.now(timezone.utc).isoformat(), **extra}}, upsert=True)
+
+@api_router.post("/nfc/heartbeat")
+async def nfc_heartbeat(request: Request):
+    """Il programma del lettore si fa sentire ogni minuto: serve a vedere dal sito se il lettore e' acceso."""
+    if not _reader_key_ok(request):
+        raise HTTPException(status_code=401, detail="Chiave del lettore non valida")
+    await _touch_reader()
+    return {"ok": True}
+
+@api_router.get("/nfc/status")
+async def nfc_status(current_user: dict = Depends(require_admin_or_technician)):
+    doc = await db.nfc_status.find_one({"key": "pc_reader"}, {"_id": 0}) or {}
+    seen = doc.get("last_seen")
+    online = False
+    if seen:
+        try:
+            online = (datetime.now(timezone.utc) - datetime.fromisoformat(seen)).total_seconds() < 150
+        except Exception:
+            online = False
+    return {"configured": bool(NFC_READER_KEY), "pc_online": online, "pc_last_seen": seen,
+            "last_scan": doc.get("last_scan")}
+
+@api_router.post("/nfc/scan")
+async def nfc_scan(data: ScanData, request: Request, credentials=Depends(security)):
+    from_pc = _reader_key_ok(request)
+    actor = None
+    if not from_pc:
+        try:
+            u = await get_current_user(request, credentials)
+        except HTTPException:
+            u = None
+        if u and u.get("role") in ("admin", "technician"):
+            actor = u
+    if not from_pc and not actor:
+        raise HTTPException(status_code=401, detail="Lettore non autorizzato: accedi come amministratore o tecnico")
+    if _rate_limited("scan:" + _client_ip(request), limit=120, window=60):
+        raise HTTPException(status_code=429, detail="Troppe letture ravvicinate")
+    source = "lettore del PC" if from_pc else f"telefono di {actor.get('name') or actor.get('email')}"
+    code = normalize_badge(data.uid)
+    user = await db.users.find_one({"badge_hash": hash_badge(code)}, {"_id": 0}) if len(code) >= 4 else None
+    now_iso = datetime.now(timezone.utc).isoformat()
+    if not user:
+        await log_event(actor, "laboratorio", "Tessera non riconosciuta", f"Letta dal {source}")
+        if from_pc:
+            await _touch_reader(last_scan={"at": now_iso, "ok": False, "text": "Tessera non riconosciuta"})
+        return {"ok": False, "action": "unknown", "message": "Tessera non riconosciuta"}
+    uid_key = user["user_id"]
+    nowts = datetime.now(timezone.utc).timestamp()
+    if nowts - _scan_last.get(uid_key, 0) < 8:
+        return {"ok": True, "action": "ignored", "name": user.get("name"), "message": f"{user.get('name')}: già registrato adesso"}
+    _scan_last[uid_key] = nowts
+    if len(_scan_last) > 2000:
+        _scan_last.clear()
+    existing = await _open_entry(uid_key)
+    if existing:
+        await db.lab_access.update_one({"access_id": existing["access_id"]}, {"$set": {"exit_time": now_iso, "exit_via": "tessera"}})
+        await log_event(user, "laboratorio", "Uscita dal laboratorio (tessera)", f"{existing['cognome']} {existing['nome']} - {source}")
+        action, text = "exit", f"Uscita registrata: {existing['cognome']} {existing['nome']}"
+    else:
+        last = await db.lab_access.find({"user_id": uid_key}, {"_id": 0}).sort("entry_time", -1).to_list(1)
+        if last:
+            cognome, nome, class_name = last[0].get("cognome"), last[0].get("nome"), last[0].get("class_name") or "—"
+        else:
+            parts = (user.get("name") or user.get("email") or "").split()
+            nome, cognome = (parts[0], " ".join(parts[1:]) or parts[0]) if parts else ("", user.get("email", ""))
+            class_name = "—"
+        entry = {
+            "access_id": f"acc_{uuid.uuid4().hex[:12]}",
+            "user_id": uid_key, "user_email": user.get("email"),
+            "cognome": (cognome or "")[:60], "nome": (nome or "")[:60], "class_name": class_name[:40],
+            "activity": "Ingresso con tessera", "entry_time": now_iso, "exit_time": None, "exit_missing": False,
+            "signed_by": user.get("name"), "via": "tessera",
+        }
+        await db.lab_access.insert_one(entry)
+        await log_event(user, "laboratorio", "Ingresso in laboratorio (tessera)", f"{entry['cognome']} {entry['nome']} - {source}")
+        action, text = "entry", f"Ingresso registrato: {entry['cognome']} {entry['nome']}"
+    if from_pc:
+        await _touch_reader(last_scan={"at": now_iso, "ok": True, "text": text})
+    else:
+        await db.nfc_status.update_one({"key": "pc_reader"}, {"$set": {"last_scan": {"at": now_iso, "ok": True, "text": text}}}, upsert=True)
+    return {"ok": True, "action": action, "name": user.get("name"), "message": text}
+
+# Include router
+app.include_router(api_router)
+
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_credentials=True,
+    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.on_event("startup")
+async def seed_school_rooms():
+    """Aggiunge una sola volta l'elenco delle aule del Malignani tra le destinazioni."""
+    try:
+        if await db.meta.find_one({"key": "rooms_seeded_v1"}):
+            return
+        existing = set()
+        async for d in db.destinations.find({}, {"_id": 0, "name": 1}):
+            existing.add((d.get("name") or "").strip().lower())
+        now = datetime.now(timezone.utc).isoformat()
+        docs = [
+            {"destination_id": f"dest_{uuid.uuid4().hex[:12]}", "name": r, "description": None, "created_at": now}
+            for r in SCHOOL_ROOMS if r.strip().lower() not in existing
+        ]
+        if docs:
+            await db.destinations.insert_many(docs)
+        await db.meta.insert_one({"key": "rooms_seeded_v1", "at": now, "added": len(docs)})
+        logger.info("Aule aggiunte come destinazioni: %s", len(docs))
+    except Exception:
+        logger.exception("Impossibile aggiungere le aule")
+
+@app.on_event("shutdown")
+async def shutdown_db_client():
+    client.close()

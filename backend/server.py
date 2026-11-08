@@ -2331,6 +2331,110 @@ async def delete_request(request_id: str, current_user: dict = Depends(require_a
     await log_event(current_user, "richieste", "Richiesta eliminata", request_id)
     return {"message": "Richiesta eliminata"}
 
+# ============== LETTORE NFC DEL PC + TELEFONI AUTORIZZATI: ingresso/uscita con la tessera ==============
+# Il programma sul PC del laboratorio (bridge/lettore_nfc.py) manda ogni tessera letta a questo indirizzo con la
+# chiave NFC_READER_KEY. Anche un telefono con il login di un amministratore/tecnico puo' mandare le letture
+# (Chrome su Android legge le tessere da solo). La tessera registra ingresso o uscita nel Registro accessi,
+# qualunque dispositivo stia usando la persona per navigare sul sito.
+
+NFC_READER_KEY = os.environ.get("NFC_READER_KEY", "")
+_scan_last = {}  # user_id -> ultimo passaggio (evita doppie letture)
+
+class ScanData(BaseModel):
+    uid: str
+
+def _reader_key_ok(request: Request) -> bool:
+    key = request.headers.get("x-reader-key", "")
+    return bool(NFC_READER_KEY) and hmac.compare_digest(key.encode("utf-8"), NFC_READER_KEY.encode("utf-8"))
+
+def _client_ip(request: Request) -> str:
+    fwd = request.headers.get("x-forwarded-for", "")
+    return fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "?")
+
+async def _touch_reader(**extra):
+    await db.nfc_status.update_one({"key": "pc_reader"}, {"$set": {"last_seen": datetime.now(timezone.utc).isoformat(), **extra}}, upsert=True)
+
+@api_router.post("/nfc/heartbeat")
+async def nfc_heartbeat(request: Request):
+    """Il programma del lettore si fa sentire ogni minuto: serve a vedere dal sito se il lettore e' acceso."""
+    if not _reader_key_ok(request):
+        raise HTTPException(status_code=401, detail="Chiave del lettore non valida")
+    await _touch_reader()
+    return {"ok": True}
+
+@api_router.get("/nfc/status")
+async def nfc_status(current_user: dict = Depends(require_admin_or_technician)):
+    doc = await db.nfc_status.find_one({"key": "pc_reader"}, {"_id": 0}) or {}
+    seen = doc.get("last_seen")
+    online = False
+    if seen:
+        try:
+            online = (datetime.now(timezone.utc) - datetime.fromisoformat(seen)).total_seconds() < 150
+        except Exception:
+            online = False
+    return {"configured": bool(NFC_READER_KEY), "pc_online": online, "pc_last_seen": seen,
+            "last_scan": doc.get("last_scan")}
+
+@api_router.post("/nfc/scan")
+async def nfc_scan(data: ScanData, request: Request, credentials=Depends(security)):
+    from_pc = _reader_key_ok(request)
+    actor = None
+    if not from_pc:
+        try:
+            u = await get_current_user(request, credentials)
+        except HTTPException:
+            u = None
+        if u and u.get("role") in ("admin", "technician"):
+            actor = u
+    if not from_pc and not actor:
+        raise HTTPException(status_code=401, detail="Lettore non autorizzato: accedi come amministratore o tecnico")
+    if _rate_limited("scan:" + _client_ip(request), limit=120, window=60):
+        raise HTTPException(status_code=429, detail="Troppe letture ravvicinate")
+    source = "lettore del PC" if from_pc else f"telefono di {actor.get('name') or actor.get('email')}"
+    code = normalize_badge(data.uid)
+    user = await db.users.find_one({"badge_hash": hash_badge(code)}, {"_id": 0}) if len(code) >= 4 else None
+    now_iso = datetime.now(timezone.utc).isoformat()
+    if not user:
+        await log_event(actor, "laboratorio", "Tessera non riconosciuta", f"Letta dal {source}")
+        if from_pc:
+            await _touch_reader(last_scan={"at": now_iso, "ok": False, "text": "Tessera non riconosciuta"})
+        return {"ok": False, "action": "unknown", "message": "Tessera non riconosciuta"}
+    uid_key = user["user_id"]
+    nowts = datetime.now(timezone.utc).timestamp()
+    if nowts - _scan_last.get(uid_key, 0) < 8:
+        return {"ok": True, "action": "ignored", "name": user.get("name"), "message": f"{user.get('name')}: già registrato adesso"}
+    _scan_last[uid_key] = nowts
+    if len(_scan_last) > 2000:
+        _scan_last.clear()
+    existing = await _open_entry(uid_key)
+    if existing:
+        await db.lab_access.update_one({"access_id": existing["access_id"]}, {"$set": {"exit_time": now_iso, "exit_via": "tessera"}})
+        await log_event(user, "laboratorio", "Uscita dal laboratorio (tessera)", f"{existing['cognome']} {existing['nome']} - {source}")
+        action, text = "exit", f"Uscita registrata: {existing['cognome']} {existing['nome']}"
+    else:
+        last = await db.lab_access.find({"user_id": uid_key}, {"_id": 0}).sort("entry_time", -1).to_list(1)
+        if last:
+            cognome, nome, class_name = last[0].get("cognome"), last[0].get("nome"), last[0].get("class_name") or "—"
+        else:
+            parts = (user.get("name") or user.get("email") or "").split()
+            nome, cognome = (parts[0], " ".join(parts[1:]) or parts[0]) if parts else ("", user.get("email", ""))
+            class_name = "—"
+        entry = {
+            "access_id": f"acc_{uuid.uuid4().hex[:12]}",
+            "user_id": uid_key, "user_email": user.get("email"),
+            "cognome": (cognome or "")[:60], "nome": (nome or "")[:60], "class_name": class_name[:40],
+            "activity": "Ingresso con tessera", "entry_time": now_iso, "exit_time": None, "exit_missing": False,
+            "signed_by": user.get("name"), "via": "tessera",
+        }
+        await db.lab_access.insert_one(entry)
+        await log_event(user, "laboratorio", "Ingresso in laboratorio (tessera)", f"{entry['cognome']} {entry['nome']} - {source}")
+        action, text = "entry", f"Ingresso registrato: {entry['cognome']} {entry['nome']}"
+    if from_pc:
+        await _touch_reader(last_scan={"at": now_iso, "ok": True, "text": text})
+    else:
+        await db.nfc_status.update_one({"key": "pc_reader"}, {"$set": {"last_scan": {"at": now_iso, "ok": True, "text": text}}}, upsert=True)
+    return {"ok": True, "action": action, "name": user.get("name"), "message": text}
+
 # Include router
 app.include_router(api_router)
 

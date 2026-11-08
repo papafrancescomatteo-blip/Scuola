@@ -18,6 +18,17 @@ if errorlevel 1 (
 set "DEST=%LOCALAPPDATA%\LettoreNFC"
 if not exist "%DEST%" mkdir "%DEST%"
 copy /Y "%~dp0lettore_nfc.py" "%DEST%\lettore_nfc.py" >nul
+if exist "%~dp0chiave_lettore.txt" if not exist "%DEST%\chiave_lettore.txt" copy /Y "%~dp0chiave_lettore.txt" "%DEST%\chiave_lettore.txt" >nul
+if exist "%DEST%\chiave_lettore.txt" goto chiave_ok
+echo.
+echo Incolla la CHIAVE DEL LETTORE (quella messa su Render come NFC_READER_KEY) e premi Invio.
+echo Serve perche' le tessere registrino ingresso e uscita anche se usi il sito dal telefono.
+echo Se non ce l'hai ancora, premi solo Invio: puoi aggiungerla dopo nel file chiave_lettore.txt
+set "KEY="
+set /p KEY=Chiave: 
+if not defined KEY goto chiave_ok
+>"%DEST%\chiave_lettore.txt" echo %KEY%
+:chiave_ok
 set "PYW="
 for /f "delims=" %%i in ('where pythonw 2^>nul') do if not defined PYW set "PYW=%%i"
 if not defined PYW (

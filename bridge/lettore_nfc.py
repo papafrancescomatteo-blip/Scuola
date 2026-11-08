@@ -11,6 +11,8 @@ import asyncio
 import json
 import os
 import sys
+import urllib.request
+import urllib.error
 
 # Se parte in automatico (senza finestra) non c'e' schermo: scrive in un file di testo
 if sys.stdout is None or sys.stderr is None:
@@ -37,6 +39,58 @@ ORIGINI_CONSENTITE = [
     "https://metrology-lab-web.onrender.com",
     "http://localhost:3000",
 ]
+# Collegamento diretto con il sito: ogni tessera letta registra ingresso/uscita nel Registro accessi,
+# anche se la persona usa il sito dal telefono. Serve la chiave scritta nel file chiave_lettore.txt
+# (la stessa messa su Render come NFC_READER_KEY).
+SERVER = "https://metrology-lab-api.onrender.com"
+CARTELLA = os.path.dirname(os.path.abspath(__file__))
+
+
+def _leggi_file(nome):
+    try:
+        with open(os.path.join(CARTELLA, nome), "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
+CHIAVE = os.environ.get("NFC_READER_KEY") or _leggi_file("chiave_lettore.txt")
+SERVER = (_leggi_file("indirizzo_sito.txt") or SERVER).rstrip("/")
+
+
+def _chiama(percorso, corpo=None):
+    """POST verso il sito. Restituisce (codice_http, dati) oppure (None, messaggio_errore)."""
+    dati = json.dumps(corpo or {}).encode("utf-8")
+    req = urllib.request.Request(
+        SERVER + percorso, data=dati, method="POST",
+        headers={"Content-Type": "application/json", "X-Reader-Key": CHIAVE},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=40) as r:
+            return r.status, json.loads(r.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read().decode("utf-8") or "{}")
+        except Exception:
+            return e.code, {}
+    except Exception as e:
+        return None, str(e)
+
+
+def invia_tessera(uid):
+    codice, ris = _chiama("/api/nfc/scan", {"uid": uid})
+    if codice == 200 and isinstance(ris, dict):
+        print("   Sito:", ris.get("message", "ok"))
+    elif codice == 401:
+        print("   Sito: chiave del lettore non valida (controlla chiave_lettore.txt)")
+    else:
+        print("   Sito non raggiungibile:", ris)
+
+
+def segnale_di_vita():
+    _chiama("/api/nfc/heartbeat")
+
+
 GET_UID = [0xFF, 0xCA, 0x00, 0x00, 0x00]  # comando standard PC/SC: restituisce l'UID
 
 clienti = set()
@@ -73,6 +127,8 @@ async def ciclo_lettura():
         uid = await loop.run_in_executor(None, leggi_uid)
         if uid and uid != ultimo:
             print("Tessera letta:", uid)
+            if CHIAVE:
+                loop.run_in_executor(None, invia_tessera, uid)
             messaggio = json.dumps({"uid": uid})
             for c in list(clienti):
                 try:
@@ -92,6 +148,15 @@ async def ciclo_lettura():
         await asyncio.sleep(0.35)
 
 
+async def battito():
+    """Ogni 45 secondi dice al sito che il lettore e' acceso (si vede nel Registro accessi)."""
+    loop = asyncio.get_running_loop()
+    while True:
+        if CHIAVE:
+            await loop.run_in_executor(None, segnale_di_vita)
+        await asyncio.sleep(45)
+
+
 async def gestisci(ws):
     clienti.add(ws)
     try:
@@ -106,7 +171,12 @@ async def main():
     print(" Lascia questa finestra aperta e apri il sito nel browser.")
     print(" Passa una tessera sul lettore: il codice arriva al sito.")
     print("=" * 56)
+    if CHIAVE:
+        print(" Collegato al sito: le tessere registrano ingresso/uscita (anche da telefono).")
+    else:
+        print(" Chiave del sito non impostata: funziona solo il login dal browser di questo PC.")
     async with websockets.serve(gestisci, "localhost", PORT, origins=ORIGINI_CONSENTITE):
+        asyncio.create_task(battito())
         await ciclo_lettura()
 
 
