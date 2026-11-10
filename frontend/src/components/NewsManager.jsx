@@ -118,7 +118,7 @@ export default function NewsManager({ token }) {
           <label className="flex items-start gap-2 text-sm text-slate-700 cursor-pointer">
             <input type="checkbox" className="mt-1" checked={isPublic} onChange={(e) => setIsPublic(e.target.checked)} />
             <span>
-              Mostra anche nella pagina di accesso
+              Mostra anche nella home pubblica e nella pagina di accesso
               <span className="block text-xs text-slate-500">
                 La vede chiunque apra il sito, anche senza account: non scrivere informazioni riservate.
               </span>
@@ -165,7 +165,7 @@ export default function NewsManager({ token }) {
                   <p className="font-medium text-slate-900">
                     {item.title}{" "}
                     {item.important && <Badge className="bg-amber-200 text-amber-800 hover:bg-amber-200 ml-1">Importante</Badge>}
-                    {item.public && <Badge className="bg-blue-100 text-blue-700 hover:bg-blue-100 ml-1">Anche nel login</Badge>}
+                    {item.public && <Badge className="bg-blue-100 text-blue-700 hover:bg-blue-100 ml-1">Anche in home e login</Badge>}
                   </p>
                   <p className="text-xs text-slate-500 mt-0.5">
                     {new Date(item.created_at).toLocaleString("it-IT")} · {item.author_name}

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
-  ArrowRight, Barcode, Camera, CreditCard, ClipboardCheck, Printer, ShieldCheck, MapPin, Mail, Ruler, Users, Clock, ExternalLink,
+  ArrowRight, Barcode, Camera, CreditCard, ClipboardCheck, Printer, ShieldCheck, MapPin, Mail, Ruler, Users, Clock, ExternalLink, Megaphone, Calendar,
 } from "lucide-react";
 import { API, resolveImage } from "../App";
 
@@ -21,15 +21,23 @@ const SHOTS = [
   { src: "/img/sito-gestione.jpg", title: "Gestione strumenti", text: "Famiglia, marca e importazione da Excel." },
 ];
 
+const fmtDate = (iso) => {
+  try { return new Date(iso).toLocaleDateString("it-IT", { day: "numeric", month: "long", year: "numeric", timeZone: "Europe/Rome" }); } catch (e) { return ""; }
+};
 const initials = (n) => (n || "").split(/\s+/).filter(Boolean).slice(0, 2).map((p) => p[0].toUpperCase()).join("");
 
 export default function Home({ user }) {
   const [site, setSite] = useState(null);
+  const [news, setNews] = useState([]);
 
   useEffect(() => {
     fetch(`${API}/site`)
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => d && setSite(d))
+      .catch(() => {});
+    fetch(`${API}/news/public?limit=5`)
+      .then((r) => (r.ok ? r.json() : []))
+      .then((d) => Array.isArray(d) && setNews(d))
       .catch(() => {});
   }, []);
 
@@ -65,6 +73,7 @@ export default function Home({ user }) {
             </div>
           </a>
           <nav className="hidden lg:flex items-center gap-6 ml-8 text-sm text-slate-300">
+            {news.length > 0 && <a href="#novita" className="hover:text-white">Novità</a>}
             <a href="#laboratorio" className="hover:text-white">Il laboratorio</a>
             <a href="#sito" className="hover:text-white">Il sito</a>
             <a href="#team" className="hover:text-white">Chi siamo</a>
@@ -118,6 +127,49 @@ export default function Home({ user }) {
           </div>
         </div>
       </section>
+
+      {/* Novità */}
+      {news.length > 0 && (
+        <section id="novita" style={{ background: "#F8FAFC" }} data-testid="home-news">
+          <div className="max-w-6xl mx-auto px-4 sm:px-6 py-14 sm:py-20">
+            <div className="flex items-end justify-between gap-4 mb-8">
+              <div>
+                <div className="text-xs font-semibold tracking-[.2em] text-blue-600 mb-3">NOVITÀ</div>
+                <h2 className="text-3xl sm:text-4xl font-bold" style={{ fontFamily: "Work Sans, sans-serif" }}><Megaphone className="inline -mt-1.5 mr-2 text-amber-500" size={30} />Dal laboratorio</h2>
+              </div>
+            </div>
+            <div className={`grid gap-5 ${news.length > 1 ? "lg:grid-cols-5" : ""}`}>
+              {/* l'ultima novità, in grande */}
+              <article className={`relative overflow-hidden rounded-3xl p-7 sm:p-9 text-white shadow-xl ${news.length > 1 ? "lg:col-span-3" : ""}`} style={{ background: `linear-gradient(135deg, ${NAVY} 0%, #1E3A8A 100%)` }} data-testid="news-featured">
+                <div className="absolute -right-10 -top-10 h-44 w-44 rounded-full opacity-20" style={{ background: "#F59E0B" }} />
+                <div className="relative">
+                  <div className="flex flex-wrap items-center gap-3 text-sm">
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-white/10 px-3 py-1 text-slate-100"><Calendar size={14} />{fmtDate(news[0].created_at)}</span>
+                    {news[0].important && <span className="rounded-full px-3 py-1 text-xs font-bold" style={{ background: "#F59E0B", color: NAVY }}>IN EVIDENZA</span>}
+                    {!news[0].important && <span className="rounded-full px-3 py-1 text-xs font-bold bg-sky-400/20 text-sky-200">ULTIMA NOVITÀ</span>}
+                  </div>
+                  <h3 className="mt-5 text-2xl sm:text-3xl font-bold leading-tight" style={{ fontFamily: "Work Sans, sans-serif" }}>{news[0].title}</h3>
+                  <p className="mt-3 text-slate-200 text-base sm:text-lg leading-relaxed whitespace-pre-wrap">{news[0].body}</p>
+                </div>
+              </article>
+              {news.length > 1 && (
+                <div className="lg:col-span-2 flex flex-col gap-4">
+                  {news.slice(1).map((n) => (
+                    <article key={n.news_id} className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm hover:shadow-md transition-shadow" style={{ borderLeft: `5px solid ${n.important ? "#F59E0B" : "#2563EB"}` }} data-testid="news-item">
+                      <div className="flex items-center gap-2 text-xs text-slate-500">
+                        <Calendar size={13} />{fmtDate(n.created_at)}
+                        {n.important && <span className="ml-1 rounded-full bg-amber-100 text-amber-700 px-2 py-0.5 font-bold">In evidenza</span>}
+                      </div>
+                      <h3 className="mt-1.5 font-bold text-lg leading-snug" style={{ fontFamily: "Work Sans, sans-serif" }}>{n.title}</h3>
+                      <p className="mt-1 text-sm text-slate-600 leading-relaxed line-clamp-3 whitespace-pre-wrap">{n.body}</p>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
+      )}
 
       {/* Cos'è */}
       <section id="laboratorio" className="max-w-6xl mx-auto px-4 sm:px-6 py-16 sm:py-24 grid md:grid-cols-2 gap-12 items-start">
