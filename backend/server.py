@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Response, Request, UploadFile, File
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Response, Request, UploadFile, File, Form
 from fastapi.security import HTTPBearer
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -2013,6 +2013,427 @@ async def get_categories(current_user: dict = Depends(get_current_user)):
 @api_router.get("/")
 async def root():
     return {"message": "ISIS Malignani - Metrology Lab Inventory API"}
+
+# ============== HOME PUBBLICA + RICHIESTE (preventivi / informazioni) ==============
+
+MAIL_TO = os.environ.get("MAIL_TO", "labmet.malignani@gmail.com")
+MAIL_FROM = os.environ.get("MAIL_FROM", MAIL_TO)  # con Brevo deve essere un mittente verificato
+MAIL_FROM_NAME = os.environ.get("MAIL_FROM_NAME", "Sito Laboratorio di Metrologia")
+
+DEFAULT_RESPONSABILI = [
+    {"id": "r_papa", "name": "Francesco Matteo Papa", "role": "Progetto e sviluppo del sito", "photo": None},
+    {"id": "r_giacuzzo", "name": "David Giacuzzo", "role": "Progetto e sviluppo del sito", "photo": None},
+    {"id": "r_busato", "name": "Federico Busato", "role": "Progetto e sviluppo del sito", "photo": None},
+]
+DEFAULT_INFO = {
+    "aula": "F.0.01 · MEC LAB",
+    "sede": "ISIS A. Malignani, Udine",
+    "indirizzo": "",
+    "map_query": "ISIS Arturo Malignani Udine",
+    "orari": "",
+}
+
+class ResponsabileIn(BaseModel):
+    name: str
+    role: str = ""
+    photo: Optional[str] = None
+
+class ResponsabiliUpdate(BaseModel):
+    items: List[ResponsabileIn]
+
+class InfoUpdate(BaseModel):
+    aula: str = ""
+    sede: str = ""
+    indirizzo: str = ""
+    map_query: str = ""
+    orari: str = ""
+
+class RequestCreate(BaseModel):
+    kind: str = "info"  # "preventivo" | "info"
+    name: str
+    email: EmailStr
+    phone: Optional[str] = None
+    organization: Optional[str] = None
+    message: str
+    website: Optional[str] = None  # campo trappola anti-spam: le persone non lo compilano
+
+class RequestUpdate(BaseModel):
+    status: Optional[str] = None  # nuova | in_corso | chiusa
+    note: Optional[str] = None
+
+async def _get_site_content() -> dict:
+    doc = await db.site_content.find_one({"key": "home"}, {"_id": 0}) or {}
+    info = dict(DEFAULT_INFO)
+    info.update(doc.get("info") or {})
+    return {
+        "responsabili": doc["responsabili"] if "responsabili" in doc else DEFAULT_RESPONSABILI,
+        "foto": doc.get("foto", []),
+        "info": info,
+    }
+
+@api_router.get("/site")
+async def get_site_public():
+    """Contenuti della home pubblica (nessun login)."""
+    data = await _get_site_content()
+    try:
+        data["stats"] = {"strumenti": await db.instruments.count_documents({})}
+    except Exception:
+        data["stats"] = {"strumenti": 0}
+    return data
+
+@api_router.put("/site/responsabili")
+async def update_responsabili(data: ResponsabiliUpdate, current_user: dict = Depends(require_admin_or_technician)):
+    if len(data.items) > 12:
+        raise HTTPException(status_code=400, detail="Massimo 12 persone")
+    items = []
+    for i, r in enumerate(data.items):
+        name = r.name.strip()
+        if not name:
+            continue
+        photo = (r.photo or "").strip() or None
+        if photo and not (photo.startswith("/api/images/") or photo.startswith("https://")):
+            raise HTTPException(status_code=400, detail="Indirizzo foto non valido")
+        items.append({"id": f"r_{uuid.uuid4().hex[:8]}", "name": name[:80], "role": r.role.strip()[:120], "photo": photo})
+    await db.site_content.update_one({"key": "home"}, {"$set": {"responsabili": items}}, upsert=True)
+    await log_event(current_user, "home", "Responsabili aggiornati", f"{len(items)} persone")
+    return {"responsabili": items}
+
+@api_router.put("/site/info")
+async def update_site_info(data: InfoUpdate, current_user: dict = Depends(require_admin_or_technician)):
+    info = {
+        "aula": data.aula.strip()[:80], "sede": data.sede.strip()[:120], "indirizzo": data.indirizzo.strip()[:160],
+        "map_query": data.map_query.strip()[:200], "orari": data.orari.strip()[:200],
+    }
+    await db.site_content.update_one({"key": "home"}, {"$set": {"info": info}}, upsert=True)
+    await log_event(current_user, "home", "Dove si trova aggiornato", info["aula"])
+    return {"info": info}
+
+async def _store_site_image(raw: bytes, max_side: int = 1600, square: int = 0) -> str:
+    from PIL import Image, ImageOps
+    try:
+        img = Image.open(io.BytesIO(raw))
+        img = ImageOps.exif_transpose(img).convert("RGB")
+    except Exception:
+        raise HTTPException(status_code=400, detail="File non valido: carica una foto JPG, PNG o WebP")
+    if square:
+        img = ImageOps.fit(img, (square, square))
+    else:
+        img.thumbnail((max_side, max_side))
+    out = io.BytesIO()
+    img.save(out, format="JPEG", quality=85, optimize=True)
+    image_id = f"site_{uuid.uuid4().hex[:16]}"
+    await db.instrument_images.insert_one({
+        "image_id": image_id, "instrument_id": None, "content_type": "image/jpeg",
+        "data": out.getvalue(), "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    return image_id
+
+@api_router.post("/site/photos")
+async def upload_site_photo(file: UploadFile = File(...), caption: str = Form(""), current_user: dict = Depends(require_admin_or_technician)):
+    raw = await file.read()
+    if len(raw) > 12 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Foto troppo grande (massimo 12 MB)")
+    current = await _get_site_content()
+    if len(current["foto"]) >= 24:
+        raise HTTPException(status_code=400, detail="Massimo 24 foto: eliminane qualcuna")
+    image_id = await _store_site_image(raw)
+    photo = {"photo_id": image_id, "url": f"/api/images/{image_id}", "caption": caption.strip()[:140]}
+    await db.site_content.update_one({"key": "home"}, {"$push": {"foto": photo}}, upsert=True)
+    await log_event(current_user, "home", "Foto aggiunta alla home", photo["caption"] or image_id)
+    return photo
+
+@api_router.post("/site/person-photo")
+async def upload_person_photo(file: UploadFile = File(...), current_user: dict = Depends(require_admin_or_technician)):
+    raw = await file.read()
+    if len(raw) > 12 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Foto troppo grande (massimo 12 MB)")
+    image_id = await _store_site_image(raw, square=400)
+    return {"url": f"/api/images/{image_id}"}
+
+@api_router.delete("/site/photos/{photo_id}")
+async def delete_site_photo(photo_id: str, current_user: dict = Depends(require_admin_or_technician)):
+    res = await db.site_content.update_one({"key": "home"}, {"$pull": {"foto": {"photo_id": photo_id}}})
+    if res.modified_count == 0:
+        raise HTTPException(status_code=404, detail="Foto non trovata")
+    await db.instrument_images.delete_one({"image_id": photo_id})
+    await log_event(current_user, "home", "Foto eliminata dalla home", photo_id)
+    return {"message": "Foto eliminata"}
+
+# ---- invio email (via HTTPS: su Render gratis le porte SMTP sono bloccate) ----
+
+def _esc(t: str) -> str:
+    return (t or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+async def send_mail(subject: str, text: str, html: str, reply_to_email: str = None, reply_to_name: str = None):
+    """Invia una mail a MAIL_TO. Ritorna (True, "") oppure (False, motivo). Non solleva eccezioni."""
+    brevo_key = os.environ.get("BREVO_API_KEY")
+    resend_key = os.environ.get("RESEND_API_KEY")
+    try:
+        if brevo_key:
+            payload = {
+                "sender": {"name": MAIL_FROM_NAME, "email": MAIL_FROM},
+                "to": [{"email": MAIL_TO}],
+                "subject": subject, "textContent": text, "htmlContent": html,
+            }
+            if reply_to_email:
+                payload["replyTo"] = {"email": reply_to_email, "name": (reply_to_name or reply_to_email)[:80]}
+            async with httpx.AsyncClient(timeout=15) as c:
+                r = await c.post("https://api.brevo.com/v3/smtp/email", json=payload,
+                                 headers={"api-key": brevo_key, "accept": "application/json"})
+            if r.status_code in (200, 201, 202):
+                return True, ""
+            return False, f"Brevo {r.status_code}: {r.text[:200]}"
+        if resend_key:
+            payload = {"from": f"{MAIL_FROM_NAME} <{os.environ.get('RESEND_FROM', 'onboarding@resend.dev')}>",
+                       "to": [MAIL_TO], "subject": subject, "text": text, "html": html}
+            if reply_to_email:
+                payload["reply_to"] = reply_to_email
+            async with httpx.AsyncClient(timeout=15) as c:
+                r = await c.post("https://api.resend.com/emails", json=payload,
+                                 headers={"Authorization": f"Bearer {resend_key}"})
+            if r.status_code in (200, 201, 202):
+                return True, ""
+            return False, f"Resend {r.status_code}: {r.text[:200]}"
+        smtp_user, smtp_pass = os.environ.get("SMTP_USER"), os.environ.get("SMTP_PASSWORD")
+        if smtp_user and smtp_pass:
+            import smtplib
+            from email.message import EmailMessage
+
+            def _send():
+                msg = EmailMessage()
+                msg["Subject"], msg["From"], msg["To"] = subject, f"{MAIL_FROM_NAME} <{smtp_user}>", MAIL_TO
+                if reply_to_email:
+                    msg["Reply-To"] = reply_to_email
+                msg.set_content(text)
+                msg.add_alternative(html, subtype="html")
+                with smtplib.SMTP_SSL(os.environ.get("SMTP_HOST", "smtp.gmail.com"), int(os.environ.get("SMTP_PORT", "465")), timeout=15) as s:
+                    s.login(smtp_user, smtp_pass)
+                    s.send_message(msg)
+            await asyncio.to_thread(_send)
+            return True, ""
+        return False, "Invio email non configurato (manca BREVO_API_KEY)"
+    except Exception as e:
+        logger.exception("Invio email fallito")
+        return False, f"{type(e).__name__}: {str(e)[:200]}"
+
+def _request_mail(doc: dict):
+    kind = "Richiesta di preventivo" if doc["kind"] == "preventivo" else "Richiesta di informazioni"
+    subject = f"[Metrologia Lab] {kind} da {doc['name']}"
+    lines = [kind, "", f"Nome: {doc['name']}", f"Email: {doc['email']}"]
+    if doc.get("phone"): lines.append(f"Telefono: {doc['phone']}")
+    if doc.get("organization"): lines.append(f"Scuola / azienda: {doc['organization']}")
+    lines += ["", "Messaggio:", doc["message"], "", "Puoi rispondere direttamente a questa mail: arriverà alla persona che ha scritto.",
+              "Tutte le richieste sono anche nella pagina «Richieste» del sito."]
+    text = "\n".join(lines)
+    rows = "".join(
+        f"<tr><td style='padding:4px 12px 4px 0;color:#64748b'>{k}</td><td style='padding:4px 0'><b>{_esc(v)}</b></td></tr>"
+        for k, v in [("Nome", doc["name"]), ("Email", doc["email"]), ("Telefono", doc.get("phone")), ("Scuola / azienda", doc.get("organization"))] if v
+    )
+    html = (f"<div style='font-family:Arial,sans-serif;max-width:560px'><h2 style='color:#0b1530'>{kind}</h2>"
+            f"<table>{rows}</table><p style='color:#64748b;margin:16px 0 4px'>Messaggio</p>"
+            f"<div style='background:#f1f5f9;border-radius:8px;padding:12px;white-space:pre-wrap'>{_esc(doc['message'])}</div>"
+            f"<p style='color:#94a3b8;font-size:12px;margin-top:16px'>Puoi rispondere a questa mail: arriva a {_esc(doc['name'])}. "
+            f"Le richieste sono anche nella pagina «Richieste» del sito.</p></div>")
+    return subject, text, html
+
+_rate = {}  # ip -> [timestamp, ...]
+
+def _rate_limited(ip: str, limit: int = 5, window: int = 3600) -> bool:
+    now = datetime.now(timezone.utc).timestamp()
+    hits = [t for t in _rate.get(ip, []) if now - t < window]
+    if len(hits) >= limit:
+        _rate[ip] = hits
+        return True
+    hits.append(now)
+    _rate[ip] = hits
+    if len(_rate) > 5000:
+        _rate.clear()
+    return False
+
+@api_router.post("/requests")
+async def create_request(data: RequestCreate, request: Request):
+    """Richiesta pubblica di preventivo o informazioni: viene salvata e inviata subito per email."""
+    if data.website:  # robot
+        return {"ok": True}
+    fwd = request.headers.get("x-forwarded-for", "")
+    ip = (fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "?"))
+    if _rate_limited(ip):
+        raise HTTPException(status_code=429, detail="Hai inviato troppe richieste: riprova tra un po'")
+    name, message = data.name.strip(), data.message.strip()
+    if len(name) < 2 or len(message) < 5:
+        raise HTTPException(status_code=400, detail="Scrivi il tuo nome e un messaggio")
+    kind = "preventivo" if data.kind == "preventivo" else "info"
+    doc = {
+        "request_id": f"req_{uuid.uuid4().hex[:12]}",
+        "kind": kind, "name": name[:100], "email": str(data.email).lower(),
+        "phone": (data.phone or "").strip()[:40] or None,
+        "organization": (data.organization or "").strip()[:120] or None,
+        "message": message[:4000],
+        "status": "nuova", "note": "",
+        "email_sent": False, "email_error": None,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.requests.insert_one(dict(doc))
+    subject, text, html = _request_mail(doc)
+    ok, err = await send_mail(subject, text, html, doc["email"], doc["name"])
+    await db.requests.update_one({"request_id": doc["request_id"]}, {"$set": {"email_sent": ok, "email_error": None if ok else err}})
+    await log_event(None, "richieste", "Nuova richiesta " + ("di preventivo" if kind == "preventivo" else "di informazioni"),
+                    f"{doc['name']} <{doc['email']}> — email {'inviata' if ok else 'NON inviata: ' + str(err)}")
+    return {"ok": True}
+
+@api_router.get("/requests")
+async def list_requests(status: Optional[str] = None, current_user: dict = Depends(require_admin_or_technician)):
+    query = {"status": status} if status in ("nuova", "in_corso", "chiusa") else {}
+    items = await db.requests.find(query, {"_id": 0}).sort("created_at", -1).to_list(500)
+    counts = {"nuova": 0, "in_corso": 0, "chiusa": 0}
+    async for r in db.requests.find({}, {"_id": 0, "status": 1}):
+        counts[r.get("status", "nuova")] = counts.get(r.get("status", "nuova"), 0) + 1
+    return {"items": items, "counts": counts}
+
+@api_router.get("/requests/count")
+async def count_new_requests(current_user: dict = Depends(require_admin_or_technician)):
+    return {"nuove": await db.requests.count_documents({"status": "nuova"})}
+
+@api_router.put("/requests/{request_id}")
+async def update_request(request_id: str, data: RequestUpdate, current_user: dict = Depends(require_admin_or_technician)):
+    updates = {}
+    if data.status is not None:
+        if data.status not in ("nuova", "in_corso", "chiusa"):
+            raise HTTPException(status_code=400, detail="Stato non valido")
+        updates["status"] = data.status
+    if data.note is not None:
+        updates["note"] = data.note.strip()[:1000]
+    if not updates:
+        raise HTTPException(status_code=400, detail="Niente da aggiornare")
+    res = await db.requests.update_one({"request_id": request_id}, {"$set": updates})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Richiesta non trovata")
+    await log_event(current_user, "richieste", "Richiesta aggiornata", f"{request_id}: " + ", ".join(f"{k}={v}" for k, v in updates.items() if k != "note") + (" (nota)" if "note" in updates else ""))
+    return await db.requests.find_one({"request_id": request_id}, {"_id": 0})
+
+@api_router.post("/requests/{request_id}/resend")
+async def resend_request(request_id: str, current_user: dict = Depends(require_admin_or_technician)):
+    doc = await db.requests.find_one({"request_id": request_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Richiesta non trovata")
+    subject, text, html = _request_mail(doc)
+    ok, err = await send_mail(subject, text, html, doc["email"], doc["name"])
+    await db.requests.update_one({"request_id": request_id}, {"$set": {"email_sent": ok, "email_error": None if ok else err}})
+    if not ok:
+        raise HTTPException(status_code=502, detail=err)
+    return {"ok": True}
+
+@api_router.delete("/requests/{request_id}")
+async def delete_request(request_id: str, current_user: dict = Depends(require_admin)):
+    res = await db.requests.delete_one({"request_id": request_id})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Richiesta non trovata")
+    await log_event(current_user, "richieste", "Richiesta eliminata", request_id)
+    return {"message": "Richiesta eliminata"}
+
+# ============== LETTORE NFC DEL PC + TELEFONI AUTORIZZATI: ingresso/uscita con la tessera ==============
+# Il programma sul PC del laboratorio (bridge/lettore_nfc.py) manda ogni tessera letta a questo indirizzo con la
+# chiave NFC_READER_KEY. Anche un telefono con il login di un amministratore/tecnico puo' mandare le letture
+# (Chrome su Android legge le tessere da solo). La tessera registra ingresso o uscita nel Registro accessi,
+# qualunque dispositivo stia usando la persona per navigare sul sito.
+
+NFC_READER_KEY = os.environ.get("NFC_READER_KEY", "")
+_scan_last = {}  # user_id -> ultimo passaggio (evita doppie letture)
+
+class ScanData(BaseModel):
+    uid: str
+
+def _reader_key_ok(request: Request) -> bool:
+    key = request.headers.get("x-reader-key", "")
+    return bool(NFC_READER_KEY) and hmac.compare_digest(key.encode("utf-8"), NFC_READER_KEY.encode("utf-8"))
+
+def _client_ip(request: Request) -> str:
+    fwd = request.headers.get("x-forwarded-for", "")
+    return fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "?")
+
+async def _touch_reader(**extra):
+    await db.nfc_status.update_one({"key": "pc_reader"}, {"$set": {"last_seen": datetime.now(timezone.utc).isoformat(), **extra}}, upsert=True)
+
+@api_router.post("/nfc/heartbeat")
+async def nfc_heartbeat(request: Request):
+    """Il programma del lettore si fa sentire ogni minuto: serve a vedere dal sito se il lettore e' acceso."""
+    if not _reader_key_ok(request):
+        raise HTTPException(status_code=401, detail="Chiave del lettore non valida")
+    await _touch_reader()
+    return {"ok": True}
+
+@api_router.get("/nfc/status")
+async def nfc_status(current_user: dict = Depends(require_admin_or_technician)):
+    doc = await db.nfc_status.find_one({"key": "pc_reader"}, {"_id": 0}) or {}
+    seen = doc.get("last_seen")
+    online = False
+    if seen:
+        try:
+            online = (datetime.now(timezone.utc) - datetime.fromisoformat(seen)).total_seconds() < 150
+        except Exception:
+            online = False
+    return {"configured": bool(NFC_READER_KEY), "pc_online": online, "pc_last_seen": seen,
+            "last_scan": doc.get("last_scan")}
+
+@api_router.post("/nfc/scan")
+async def nfc_scan(data: ScanData, request: Request, credentials=Depends(security)):
+    from_pc = _reader_key_ok(request)
+    actor = None
+    if not from_pc:
+        try:
+            u = await get_current_user(request, credentials)
+        except HTTPException:
+            u = None
+        if u and u.get("role") in ("admin", "technician"):
+            actor = u
+    if not from_pc and not actor:
+        raise HTTPException(status_code=401, detail="Lettore non autorizzato: accedi come amministratore o tecnico")
+    if _rate_limited("scan:" + _client_ip(request), limit=120, window=60):
+        raise HTTPException(status_code=429, detail="Troppe letture ravvicinate")
+    source = "lettore del PC" if from_pc else f"telefono di {actor.get('name') or actor.get('email')}"
+    code = normalize_badge(data.uid)
+    user = await db.users.find_one({"badge_hash": hash_badge(code)}, {"_id": 0}) if len(code) >= 4 else None
+    now_iso = datetime.now(timezone.utc).isoformat()
+    if not user:
+        await log_event(actor, "laboratorio", "Tessera non riconosciuta", f"Letta dal {source}")
+        if from_pc:
+            await _touch_reader(last_scan={"at": now_iso, "ok": False, "text": "Tessera non riconosciuta"})
+        return {"ok": False, "action": "unknown", "message": "Tessera non riconosciuta"}
+    uid_key = user["user_id"]
+    nowts = datetime.now(timezone.utc).timestamp()
+    if nowts - _scan_last.get(uid_key, 0) < 8:
+        return {"ok": True, "action": "ignored", "name": user.get("name"), "message": f"{user.get('name')}: già registrato adesso"}
+    _scan_last[uid_key] = nowts
+    if len(_scan_last) > 2000:
+        _scan_last.clear()
+    existing = await _open_entry(uid_key)
+    if existing:
+        await db.lab_access.update_one({"access_id": existing["access_id"]}, {"$set": {"exit_time": now_iso, "exit_via": "tessera"}})
+        await log_event(user, "laboratorio", "Uscita dal laboratorio (tessera)", f"{existing['cognome']} {existing['nome']} - {source}")
+        action, text = "exit", f"Uscita registrata: {existing['cognome']} {existing['nome']}"
+    else:
+        last = await db.lab_access.find({"user_id": uid_key}, {"_id": 0}).sort("entry_time", -1).to_list(1)
+        if last:
+            cognome, nome, class_name = last[0].get("cognome"), last[0].get("nome"), last[0].get("class_name") or "—"
+        else:
+            parts = (user.get("name") or user.get("email") or "").split()
+            nome, cognome = (parts[0], " ".join(parts[1:]) or parts[0]) if parts else ("", user.get("email", ""))
+            class_name = "—"
+        entry = {
+            "access_id": f"acc_{uuid.uuid4().hex[:12]}",
+            "user_id": uid_key, "user_email": user.get("email"),
+            "cognome": (cognome or "")[:60], "nome": (nome or "")[:60], "class_name": class_name[:40],
+            "activity": "Ingresso con tessera", "entry_time": now_iso, "exit_time": None, "exit_missing": False,
+            "signed_by": user.get("name"), "via": "tessera",
+        }
+        await db.lab_access.insert_one(entry)
+        await log_event(user, "laboratorio", "Ingresso in laboratorio (tessera)", f"{entry['cognome']} {entry['nome']} - {source}")
+        action, text = "entry", f"Ingresso registrato: {entry['cognome']} {entry['nome']}"
+    if from_pc:
+        await _touch_reader(last_scan={"at": now_iso, "ok": True, "text": text})
+    else:
+        await db.nfc_status.update_one({"key": "pc_reader"}, {"$set": {"last_scan": {"at": now_iso, "ok": True, "text": text}}}, upsert=True)
+    return {"ok": True, "action": action, "name": user.get("name"), "message": text}
 
 # Include router
 app.include_router(api_router)

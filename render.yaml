@@ -2,7 +2,6 @@ services:
   - type: web
     name: metrology-lab-api
     runtime: python
-    plan: free
     rootDir: backend
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT
@@ -18,6 +17,10 @@ services:
         sync: false
       - key: CORS_ORIGINS
         sync: false
+      - key: BREVO_API_KEY
+        sync: false
+      - key: MAIL_TO
+        value: labmet.malignani@gmail.com
 
   - type: web
     name: metrology-lab-web
@@ -26,8 +29,8 @@ services:
     buildCommand: yarn install && yarn build
     staticPublishPath: ./build
     envVars:
-       - key: REACT_APP_BACKEND_URL
-         value: https://metrology-lab-api.onrender.com
+      - key: REACT_APP_BACKEND_URL
+        value: https://metrology-lab-api.onrender.com
     routes:
       - type: rewrite
         source: /*

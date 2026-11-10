@@ -1,0 +1,30 @@
+LETTORE NFC (ACS ACR122U) - COME FARLO FUNZIONARE CON IL SITO
+
+Perche' serve questo: il lettore bianco ACR122U non "scrive" il codice come una tastiera
+(come fa invece l'altro lettore delle tessere). Parla un altro linguaggio (PC/SC), quindi
+il browser da solo non lo vede. Serve questo piccolo programma sul PC dove e' collegato.
+
+UNA VOLTA SOLA
+1) Installa Python da https://www.python.org/downloads/ (spunta "Add python.exe to PATH").
+2) Collega il lettore al PC. Se Windows non lo riconosce, installa il driver "ACR122U"
+   dal sito acs.com.hk (sezione Download). Di solito Windows 10/11 lo trova da solo.
+
+PARTENZA AUTOMATICA (consigliata)
+Doppio clic su INSTALLA_AUTOMATICO.bat (una volta sola). Da quel momento il lettore parte da solo
+all'accensione del PC, senza finestre. Per toglierlo: DISINSTALLA_AUTOMATICO.bat.
+Se qualcosa non va, guarda il file lettore_log.txt nella cartella %LOCALAPPDATA%\LettoreNFC.
+
+OPPURE A MANO, OGNI VOLTA CHE USI IL SITO
+1) Doppio clic su AVVIA_LETTORE.bat e lascia la finestra nera aperta.
+2) Apri il sito con Chrome o Edge.
+3) Nella pagina di login compare "Lettore NFC collegato". Passa il tag: entri.
+
+ASSEGNARE UN TAG A UNA PERSONA
+Amministrazione > Utenti > icona tessera, poi passa il tag sul lettore: viene assegnato subito.
+
+PROBLEMI COMUNI
+- "Nessun lettore trovato": cavo USB, oppure driver ACR122U da installare.
+- Il sito non dice "Lettore NFC collegato": controlla che la finestra nera sia aperta.
+  Funziona con Chrome/Edge/Firefox; Safari non e' supportato.
+- Il tag non viene letto: appoggialo al centro del cerchio NFC. Non funziona se il tag e'
+  incollato su metallo (servono tag "on-metal").

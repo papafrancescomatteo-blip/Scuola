@@ -48,3 +48,5 @@ I valori `MONGO_URL` e `JWT_SECRET` vanno inseriti nelle **Environment Variables
 - Non condividere il dump: contiene dati personali e credenziali sotto forma di hash.
 - L'accesso Google usa un provider esterno già presente nel codice; il suo flusso e gli URL di callback potrebbero richiedere una configurazione separata per il nuovo dominio. Il login email/password usa invece gli account migrati.
 - I file `.env` già presenti localmente restano sul computer e sono ignorati da Git. Se erano stati pubblicati in passato, ruota i segreti esposti e rimuovili anche dalla cronologia del repository.
+## Email delle richieste (home pubblica)
+Per l'invio automatico delle email servono le variabili `BREVO_API_KEY` (e facoltativamente `MAIL_TO`, `MAIL_FROM`) sul servizio API: vedi `INVIO_EMAIL.md`.

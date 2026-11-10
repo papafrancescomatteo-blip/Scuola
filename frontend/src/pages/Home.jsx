@@ -198,7 +198,7 @@ export default function Home({ user }) {
             <h2 className="text-3xl sm:text-4xl font-bold mb-10" style={{ fontFamily: "Work Sans, sans-serif" }}><Users className="inline -mt-1.5 mr-2 text-blue-600" size={32} />Responsabili e team</h2>
             <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-5">
               {team.map((p) => (
-                <div key={p.id} className="flex items-center gap-4 bg-white rounded-2xl p-5 border border-slate-200 shadow-sm">
+                <div key={p.id} className="flex items-start gap-4 bg-white rounded-2xl p-5 border border-slate-200 shadow-sm">
                   {p.photo ? (
                     <img src={resolveImage(p.photo)} alt={p.name} className="h-16 w-16 rounded-full object-cover shrink-0" />
                   ) : (
@@ -206,7 +206,8 @@ export default function Home({ user }) {
                   )}
                   <div className="min-w-0">
                     <div className="font-bold text-lg leading-tight" style={{ fontFamily: "Work Sans, sans-serif" }}>{p.name}</div>
-                    {p.role && <div className="text-sm text-slate-500 mt-0.5">{p.role}</div>}
+                    {p.role && <div className="text-sm font-semibold text-blue-600 mt-0.5">{p.role}</div>}
+                    {p.bio && <p className="text-sm text-slate-600 mt-2 leading-relaxed">{p.bio}</p>}
                   </div>
                 </div>
               ))}

@@ -1,7 +1,11 @@
+import { useState } from "react";
 import Sidebar from "../components/Sidebar";
 import LabAccessViewer from "../components/LabAccessViewer";
+import NfcPanel from "../components/NfcPanel";
 
 export default function RegistroAccessi({ user, token, logout }) {
+  const [refresh, setRefresh] = useState(0);
+  const canManage = user?.role === "admin" || user?.role === "technician";
   return (
     <div className="layout-sidebar">
       <Sidebar user={user} logout={logout} activePage="registro" />
@@ -17,7 +21,9 @@ export default function RegistroAccessi({ user, token, logout }) {
             </p>
           </div>
 
-          <LabAccessViewer token={token} canDelete={user?.role === "admin"} />
+          {canManage && <NfcPanel token={token} onChange={() => setRefresh((n) => n + 1)} />}
+
+          <LabAccessViewer key={refresh} token={token} canDelete={user?.role === "admin"} />
         </div>
       </main>
     </div>

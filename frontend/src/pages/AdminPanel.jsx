@@ -38,6 +38,7 @@ import {
 import Sidebar from "../components/Sidebar";
 import NewsManager from "../components/NewsManager";
 import LogsViewer from "../components/LogsViewer";
+import HomeEditor from "../components/HomeEditor";
 import ImageImportDialog from "../components/ImageImportDialog";
 import { 
   Plus, 
@@ -58,6 +59,7 @@ import {
   CreditCard,
   Megaphone,
   ScrollText,
+  Globe,
   ImageIcon
 } from "lucide-react";
 import { API } from "../App";
@@ -612,7 +614,7 @@ export default function AdminPanel({ user, token, logout }) {
 
           <Tabs defaultValue="instruments" className="space-y-6">
             {user?.role === "admin" ? (
-              <TabsList className="grid w-full max-w-3xl grid-cols-5">
+              <TabsList className="grid w-full max-w-4xl grid-cols-6">
                 <TabsTrigger value="instruments" data-testid="instruments-tab">
                   <Package size={16} className="mr-2" />
                   Strumenti
@@ -629,13 +631,17 @@ export default function AdminPanel({ user, token, logout }) {
                   <Megaphone size={16} className="mr-2" />
                   News
                 </TabsTrigger>
+                <TabsTrigger value="home" data-testid="home-tab">
+                  <Globe size={16} className="mr-2" />
+                  Home
+                </TabsTrigger>
                 <TabsTrigger value="logs" data-testid="logs-tab">
                   <ScrollText size={16} className="mr-2" />
                   Registro
                 </TabsTrigger>
               </TabsList>
             ) : (
-              <TabsList className="grid w-full max-w-sm grid-cols-2">
+              <TabsList className="grid w-full max-w-md grid-cols-3">
                 <TabsTrigger value="instruments" data-testid="instruments-tab">
                   <Package size={16} className="mr-2" />
                   Strumenti
@@ -644,12 +650,21 @@ export default function AdminPanel({ user, token, logout }) {
                   <Megaphone size={16} className="mr-2" />
                   News
                 </TabsTrigger>
+                <TabsTrigger value="home" data-testid="home-tab">
+                  <Globe size={16} className="mr-2" />
+                  Home
+                </TabsTrigger>
               </TabsList>
             )}
 
             {/* News Tab */}
             <TabsContent value="news">
               <NewsManager token={token} />
+            </TabsContent>
+
+            {/* Home pubblica */}
+            <TabsContent value="home">
+              <HomeEditor token={token} />
             </TabsContent>
 
             {/* Logs Tab (solo admin) */}
