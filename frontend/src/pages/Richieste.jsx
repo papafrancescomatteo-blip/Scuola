@@ -25,6 +25,8 @@ export default function Richieste({ user, token, logout }) {
   const [error, setError] = useState("");
   const [notes, setNotes] = useState({});
   const [busy, setBusy] = useState("");
+  const [mail, setMail] = useState(null);
+  const [testMsg, setTestMsg] = useState(null);
 
   const load = useCallback(async () => {
     try {
@@ -48,6 +50,18 @@ export default function Richieste({ user, token, logout }) {
   }, [headers]);
 
   useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    fetch(`${API}/requests/mail-status`, { headers, credentials: "include" }).then((r) => (r.ok ? r.json() : null)).then(setMail).catch(() => {});
+  }, [headers]);
+
+  const testMail = async () => {
+    setBusy("test"); setTestMsg(null);
+    try {
+      const res = await fetch(`${API}/requests/mail-test`, { method: "POST", headers, credentials: "include" });
+      const d = await res.json().catch(() => ({}));
+      setTestMsg(res.ok ? d : { ok: false, error: "Il server non ha risposto correttamente." });
+    } catch (e) { setTestMsg({ ok: false, error: "Errore di connessione." }); } finally { setBusy(""); }
+  };
 
   const update = async (id, body) => {
     setBusy(id);
@@ -96,6 +110,19 @@ export default function Richieste({ user, token, logout }) {
               <p className="text-slate-500 mt-1">Preventivi e richieste di informazioni arrivati dalla home pubblica</p>
             </div>
             <Button variant="outline" onClick={load} data-testid="req-refresh"><RefreshCw size={16} className="mr-2" />Aggiorna</Button>
+          </div>
+
+          {mail && !mail.configured && (
+            <div className="p-3 mb-4 rounded-lg bg-red-50 border border-red-200 text-red-800 text-sm">
+              <b>L'invio email non è configurato.</b> Su Render, nel servizio API, manca la variabile <code>BREVO_API_KEY</code>: finché non c'è, le richieste vengono salvate qui ma nessuna email parte. Guida: INVIO_EMAIL.md.
+            </div>
+          )}
+          <div className="flex flex-wrap items-center gap-3 mb-4">
+            <Button variant="outline" size="sm" onClick={testMail} disabled={busy === "test"} data-testid="mail-test"><Mail size={15} className="mr-2" />{busy === "test" ? "Invio..." : "Prova invio email"}</Button>
+            {mail && <span className="text-xs text-slate-500">Le richieste arrivano a <b>{mail.mail_to}</b>{mail.provider ? ` (invio con ${mail.provider})` : ""}</span>}
+            {testMsg && (testMsg.ok
+              ? <span className="text-sm text-emerald-700">Email di prova inviata a {testMsg.mail_to}: controlla la posta (anche Spam).</span>
+              : <span className="text-sm text-red-700">Non inviata: {testMsg.error}</span>)}
           </div>
 
           {failed > 0 && (

@@ -2291,6 +2291,20 @@ async def list_requests(status: Optional[str] = None, current_user: dict = Depen
         counts[r.get("status", "nuova")] = counts.get(r.get("status", "nuova"), 0) + 1
     return {"items": items, "counts": counts}
 
+@api_router.get("/requests/mail-status")
+async def mail_status(current_user: dict = Depends(require_admin_or_technician)):
+    provider = "brevo" if os.environ.get("BREVO_API_KEY") else ("resend" if os.environ.get("RESEND_API_KEY") else ("smtp" if os.environ.get("SMTP_USER") and os.environ.get("SMTP_PASSWORD") else None))
+    return {"configured": provider is not None, "provider": provider, "mail_to": MAIL_TO, "mail_from": MAIL_FROM}
+
+@api_router.post("/requests/mail-test")
+async def mail_test(current_user: dict = Depends(require_admin_or_technician)):
+    subject = "[Metrologia Lab] Prova invio email"
+    text = "Questa è una email di prova dal sito del Laboratorio di Metrologia. Se la leggi, l'invio funziona."
+    html = f"<div style='font-family:Arial,sans-serif'><h3>Prova invio email</h3><p>{text}</p></div>"
+    ok, why = await send_mail(subject, text, html)
+    await log_event(current_user, "richieste", "Prova invio email", "riuscita" if ok else f"fallita: {why}")
+    return {"ok": ok, "error": why, "mail_to": MAIL_TO}
+
 @api_router.get("/requests/count")
 async def count_new_requests(current_user: dict = Depends(require_admin_or_technician)):
     return {"nuove": await db.requests.count_documents({"status": "nuova"})}
