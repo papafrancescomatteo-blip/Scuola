@@ -29,6 +29,7 @@ export default function HomeEditor({ token }) {
       }
     } catch (e) { /* niente */ }
   };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { load(); }, []);
 
   const flash = (m) => { setMsg(m); setError(""); setTimeout(() => setMsg(""), 4000); };
@@ -37,7 +38,7 @@ export default function HomeEditor({ token }) {
   const saveTeam = async () => {
     setBusy(true);
     try {
-      const res = await fetch(`${API}/site/responsabili`, { method: "PUT", headers: jsonHeaders, credentials: "include", body: JSON.stringify({ items: team.map(({ name, role, photo }) => ({ name, role, photo })) }) });
+      const res = await fetch(`${API}/site/responsabili`, { method: "PUT", headers: jsonHeaders, credentials: "include", body: JSON.stringify({ items: team.map(({ name, role, bio, photo }) => ({ name, role, bio: bio || "", photo })) }) });
       const d = await res.json().catch(() => ({}));
       if (!res.ok) return fail(typeof d.detail === "string" ? d.detail : "Salvataggio non riuscito");
       setTeam(d.responsabili);
@@ -115,10 +116,11 @@ export default function HomeEditor({ token }) {
               <Input className="flex-1 min-w-[160px]" placeholder="Nome e cognome" value={p.name} onChange={(e) => setP(i, "name", e.target.value)} />
               <Input className="flex-1 min-w-[160px]" placeholder="Ruolo (es. Responsabile del laboratorio)" value={p.role} onChange={(e) => setP(i, "role", e.target.value)} />
               <Button variant="ghost" size="icon" className="text-red-600" onClick={() => setTeam((t) => t.filter((_, j) => j !== i))} aria-label="Rimuovi"><Trash2 size={16} /></Button>
+              <Input className="w-full" placeholder="Breve descrizione (es. il professore che ci ha supportato...)" maxLength={320} value={p.bio || ""} onChange={(e) => setP(i, "bio", e.target.value)} />
             </div>
           ))}
           <div className="flex flex-wrap gap-2">
-            <Button variant="outline" onClick={() => setTeam((t) => [...t, { id: `new_${Date.now()}`, name: "", role: "", photo: null }])} data-testid="team-add"><Plus size={16} className="mr-2" />Aggiungi persona</Button>
+            <Button variant="outline" onClick={() => setTeam((t) => [...t, { id: `new_${Date.now()}`, name: "", role: "", bio: "", photo: null }])} data-testid="team-add"><Plus size={16} className="mr-2" />Aggiungi persona</Button>
             <Button onClick={saveTeam} disabled={busy} className="bg-blue-600 hover:bg-blue-700" data-testid="team-save">Salva responsabili</Button>
           </div>
         </CardContent>

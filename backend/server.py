@@ -2021,9 +2021,9 @@ MAIL_FROM = os.environ.get("MAIL_FROM", MAIL_TO)  # con Brevo deve essere un mit
 MAIL_FROM_NAME = os.environ.get("MAIL_FROM_NAME", "Sito Laboratorio di Metrologia")
 
 DEFAULT_RESPONSABILI = [
-    {"id": "r_papa", "name": "Francesco Matteo Papa", "role": "Progetto e sviluppo del sito", "photo": None},
-    {"id": "r_giacuzzo", "name": "David Giacuzzo", "role": "Progetto e sviluppo del sito", "photo": None},
-    {"id": "r_busato", "name": "Federico Busato", "role": "Progetto e sviluppo del sito", "photo": None},
+    {"id": "r_papa", "name": "Francesco Matteo Papa", "role": "Responsabile del progetto e del laboratorio", "bio": "Guida il progetto e ne coordina il lavoro. Segue lo sviluppo del sito e la gestione quotidiana del laboratorio.", "photo": None},
+    {"id": "r_giacuzzo", "name": "David Giacuzzo", "role": "Vice responsabile del progetto e responsabile del laboratorio", "bio": "Affianca il responsabile nella gestione del progetto e cura l'organizzazione del laboratorio.", "photo": None},
+    {"id": "r_busato", "name": "Federico Busato", "role": "Docente di riferimento e coordinatore del progetto", "bio": "Il professore che ci ha seguito e supportato fin dall'inizio: la nostra guida e il punto di riferimento per il laboratorio.", "photo": None},
 ]
 DEFAULT_INFO = {
     "aula": "F.0.01 · MEC LAB",
@@ -2036,6 +2036,7 @@ DEFAULT_INFO = {
 class ResponsabileIn(BaseModel):
     name: str
     role: str = ""
+    bio: str = ""
     photo: Optional[str] = None
 
 class ResponsabiliUpdate(BaseModel):
@@ -2093,7 +2094,7 @@ async def update_responsabili(data: ResponsabiliUpdate, current_user: dict = Dep
         photo = (r.photo or "").strip() or None
         if photo and not (photo.startswith("/api/images/") or photo.startswith("https://")):
             raise HTTPException(status_code=400, detail="Indirizzo foto non valido")
-        items.append({"id": f"r_{uuid.uuid4().hex[:8]}", "name": name[:80], "role": r.role.strip()[:120], "photo": photo})
+        items.append({"id": f"r_{uuid.uuid4().hex[:8]}", "name": name[:80], "role": r.role.strip()[:120], "bio": (r.bio or "").strip()[:320], "photo": photo})
     await db.site_content.update_one({"key": "home"}, {"$set": {"responsabili": items}}, upsert=True)
     await log_event(current_user, "home", "Responsabili aggiornati", f"{len(items)} persone")
     return {"responsabili": items}
