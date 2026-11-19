@@ -15,6 +15,7 @@ import Filamenti from "./pages/Filamenti";
 import Home from "./pages/Home";
 import Richiedi from "./pages/Richiedi";
 import Richieste from "./pages/Richieste";
+import Scadenze from "./pages/Scadenze";
 
 const configuredBackendUrl = process.env.REACT_APP_BACKEND_URL || "";
 const BACKEND_URL = configuredBackendUrl
@@ -234,6 +235,14 @@ function AppRouter() {
           <AdminRoute user={user} loading={loading}>
             <RegistroAccessi user={user} token={token} logout={logout} />
           </AdminRoute>
+        }
+      />
+      <Route
+        path="/scadenze"
+        element={
+          <ProtectedRoute user={user} loading={loading}>
+            <Scadenze user={user} token={token} logout={logout} />
+          </ProtectedRoute>
         }
       />
       <Route

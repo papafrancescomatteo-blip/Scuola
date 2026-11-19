@@ -40,7 +40,6 @@ import NewsManager from "../components/NewsManager";
 import LogsViewer from "../components/LogsViewer";
 import HomeEditor from "../components/HomeEditor";
 import ImageImportDialog from "../components/ImageImportDialog";
-import BulkEditDialog from "../components/BulkEditDialog";
 import { 
   Plus, 
   Pencil, 
@@ -105,7 +104,6 @@ export default function AdminPanel({ user, token, logout }) {
 
   // Importazione foto da Excel
   const [showImageImport, setShowImageImport] = useState(false);
-  const [showBulkEdit, setShowBulkEdit] = useState(false);
 
   // Excel Import State
   const [showImportDialog, setShowImportDialog] = useState(false);
@@ -747,14 +745,6 @@ export default function AdminPanel({ user, token, logout }) {
                       >
                         <ImageIcon size={18} className="mr-2" />
                         Importa foto
-                      </Button>
-                      <Button
-                        variant="outline"
-                        onClick={() => setShowBulkEdit(true)}
-                        data-testid="bulk-edit-btn"
-                      >
-                        <Pencil size={18} className="mr-2" />
-                        Modifica da Excel
                       </Button>
                       <Button 
                         onClick={openNewInstrument}
@@ -1419,14 +1409,6 @@ export default function AdminPanel({ user, token, logout }) {
             </DialogFooter>
           </DialogContent>
         </Dialog>
-
-        <BulkEditDialog
-          open={showBulkEdit}
-          onOpenChange={setShowBulkEdit}
-          token={token}
-          isAdmin={user?.role === "admin"}
-          onDone={fetchData}
-        />
 
         <ImageImportDialog
           open={showImageImport}

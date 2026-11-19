@@ -1,9 +1,8 @@
-MODIFICA DA EXCEL (qualsiasi campo di strumenti, filamenti, destinazioni)
-Copia i 3 file nelle stesse cartelle del progetto (sostituisci), poi commit e push: Render ripubblica da solo. Nessuna variabile da cambiare.
-Se non hai ancora pubblicato "Scadenze tarature" e "tessera/NFC", usa prima quei due zip (server.py e AdminPanel.jsx qui sono completi e li includono).
+ERRORE DI TARATURA + PAGINA SCADENZE TARATURE
+Copia i file nelle stesse cartelle del progetto (sostituisci), poi commit e push: Render ripubblica da solo. Nessuna variabile da cambiare.
+Contiene anche l'aggiornamento "tessera / NFC / entrambi" (server.py e AdminPanel.jsx sono completi).
 
-Uso: Amministrazione -> Strumenti -> "Modifica da Excel".
-1. Scegli Strumenti / Filamenti / Destinazioni e scarica l'Excel con i dati attuali.
-2. Cambia le celle che vuoi (svuota una cella per cancellare il dato). Non toccare la colonna ID grigia.
-3. Ricarica il file: vedi ogni modifica (prima -> dopo) e gli errori, poi premi "Applica".
-Non crea ne' elimina elementi. Solo gli amministratori possono modificare le destinazioni.
+- Admin -> Strumenti -> modifica: nuovi campi "Errore di taratura" (es. +0,002) e "Unita'" (mm, um, C...).
+- Scheda strumento: mostra l'errore e lo stato della taratura (valida / in scadenza / scaduta).
+- Nuova pagina "Scadenze tarature" nel menu (per tutti gli utenti): scadute, in scadenza (15/30/60/90/180 giorni), valide, senza data.
+- Excel: il modello ha due colonne in piu' (Errore taratura, Unita' errore); i vecchi file senza queste colonne funzionano lo stesso.

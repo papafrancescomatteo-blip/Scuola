@@ -16,7 +16,8 @@ import {
   DoorClosed,
   ClipboardCheck,
   Printer,
-  Inbox
+  Inbox,
+  CalendarClock
 } from "lucide-react";
 
 const SCHOOL_LOGO = "https://customer-assets.emergentagent.com/job_lab-inventory-13/artifacts/qkvfmo8i_cropped-MALIGNANI_logo-ISIS-pittogramma.png";
@@ -127,6 +128,12 @@ export default function Sidebar({ user, logout, activePage }) {
       label: "Ricerca", 
       icon: Barcode, 
       path: "/search" 
+    },
+    {
+      id: "scadenze",
+      label: "Scadenze tarature",
+      icon: CalendarClock,
+      path: "/scadenze"
     },
     { 
       id: "filamenti", 

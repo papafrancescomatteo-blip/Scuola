@@ -362,6 +362,21 @@ export default function InstrumentDetail({ user, token, logout }) {
                       <div>
                         <p className="text-xs uppercase tracking-wider text-slate-400 mb-1">Scadenza</p>
                         <p className="text-slate-900 font-medium">{instrument.calibration_expiry}</p>
+                        {(() => {
+                          const left = Math.round((new Date(`${instrument.calibration_expiry}T00:00:00`) - new Date(new Date().toDateString())) / 86400000);
+                          if (Number.isNaN(left)) return null;
+                          if (left < 0) return <p className="text-xs mt-1 text-red-600 font-medium" data-testid="calibration-state">Taratura scaduta da {Math.abs(left)} giorni</p>;
+                          if (left <= 30) return <p className="text-xs mt-1 text-amber-700 font-medium" data-testid="calibration-state">In scadenza tra {left} giorni</p>;
+                          return <p className="text-xs mt-1 text-green-700" data-testid="calibration-state">Taratura valida</p>;
+                        })()}
+                      </div>
+                    )}
+                    {instrument.calibration_error && (
+                      <div>
+                        <p className="text-xs uppercase tracking-wider text-slate-400 mb-1">Errore di taratura</p>
+                        <p className="text-slate-900 font-medium" data-testid="calibration-error">
+                          {instrument.calibration_error} {instrument.calibration_error_unit || ""}
+                        </p>
                       </div>
                     )}
                   </div>
