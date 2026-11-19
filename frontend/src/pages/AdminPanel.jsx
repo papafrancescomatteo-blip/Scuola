@@ -40,6 +40,7 @@ import NewsManager from "../components/NewsManager";
 import LogsViewer from "../components/LogsViewer";
 import HomeEditor from "../components/HomeEditor";
 import ImageImportDialog from "../components/ImageImportDialog";
+import BulkEditDialog from "../components/BulkEditDialog";
 import { 
   Plus, 
   Pencil, 
@@ -85,6 +86,8 @@ export default function AdminPanel({ user, token, logout }) {
     location: "",
     calibration_date: "",
     calibration_expiry: "",
+    calibration_error: "",
+    calibration_error_unit: "",
     category: "",
     brand: "",
     family: ""
@@ -94,12 +97,15 @@ export default function AdminPanel({ user, token, logout }) {
   // Badge Dialog State
   const [badgeUser, setBadgeUser] = useState(null);
   const [badgeCode, setBadgeCode] = useState("");
+  const [nfcCode, setNfcCode] = useState("");
+  const [badgeMode, setBadgeMode] = useState("both"); // "tessera" | "nfc" | "both"
   const [badgeLoading, setBadgeLoading] = useState(false);
   const [badgeError, setBadgeError] = useState("");
   const [badgeDone, setBadgeDone] = useState("");
 
   // Importazione foto da Excel
   const [showImageImport, setShowImageImport] = useState(false);
+  const [showBulkEdit, setShowBulkEdit] = useState(false);
 
   // Excel Import State
   const [showImportDialog, setShowImportDialog] = useState(false);
@@ -161,16 +167,25 @@ export default function AdminPanel({ user, token, logout }) {
     fetchData();
   }, [token]);
 
-  // Lettore NFC USB (ACR122U): quando il dialog è aperto, la tessera passata viene assegnata subito
+  // Lettore NFC USB (ACR122U) e telefoni: quando il dialog e' aperto, il tag passato viene assegnato subito
   const saveBadgeRef = useRef(null);
+  const badgeModeRef = useRef("both");
   useEffect(() => {
     saveBadgeRef.current = saveBadge;
+    badgeModeRef.current = badgeMode;
   });
   useEffect(() => {
     if (!badgeUser) return undefined;
     return subscribeNfc((uid) => {
-      setBadgeCode(uid);
-      if (saveBadgeRef.current) saveBadgeRef.current(uid);
+      if (!saveBadgeRef.current) return;
+      // Con la sola "Tessera" il codice letto va nello spazio tessera, altrimenti nello spazio NFC
+      if (badgeModeRef.current === "tessera") {
+        setBadgeCode(uid);
+        saveBadgeRef.current({ badge: uid });
+      } else {
+        setNfcCode(uid);
+        saveBadgeRef.current({ nfc: uid });
+      }
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [badgeUser && badgeUser.user_id]);
@@ -179,13 +194,25 @@ export default function AdminPanel({ user, token, logout }) {
   const openBadgeDialog = (userItem) => {
     setBadgeUser(userItem);
     setBadgeCode("");
+    setNfcCode("");
+    setBadgeMode(userItem.has_badge && !userItem.has_nfc ? "tessera" : userItem.has_nfc && !userItem.has_badge ? "nfc" : "both");
     setBadgeError("");
     setBadgeDone("");
   };
 
-  const saveBadge = async (codeArg) => {
-    const code = typeof codeArg === "string" ? codeArg : badgeCode;
-    if (!badgeUser || code.trim().length < 4) return;
+  // payload: { badge?: string, nfc?: string }. Se non c'e', salva quello che e' scritto nei campi visibili.
+  const saveBadge = async (payloadArg) => {
+    const payload = payloadArg && typeof payloadArg === "object" && !("nativeEvent" in payloadArg)
+      ? payloadArg
+      : {
+          ...(badgeMode !== "nfc" && badgeCode.trim() ? { badge: badgeCode } : {}),
+          ...(badgeMode !== "tessera" && nfcCode.trim() ? { nfc: nfcCode } : {})
+        };
+    const tooShort = Object.values(payload).some((v) => String(v).trim().length < 4);
+    if (!badgeUser || Object.keys(payload).length === 0 || tooShort) {
+      if (badgeUser && (Object.keys(payload).length === 0 || tooShort)) setBadgeError("Inserisci almeno un codice di 4 caratteri");
+      return;
+    }
     setBadgeLoading(true);
     setBadgeError("");
     setBadgeDone("");
@@ -194,41 +221,44 @@ export default function AdminPanel({ user, token, logout }) {
         method: "PUT",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         credentials: "include",
-        body: JSON.stringify({ badge: code })
+        body: JSON.stringify(payload)
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
-        setBadgeError(typeof data.detail === "string" ? data.detail : "Impossibile salvare la tessera");
+        setBadgeError(typeof data.detail === "string" ? data.detail : "Impossibile salvare");
       } else {
-        setBadgeDone("Tessera assegnata a " + badgeUser.name);
-        setBadgeUser({ ...badgeUser, has_badge: true });
+        setBadgeDone(`${data.message || "Salvato"} · ${badgeUser.name}`);
+        setBadgeUser((prev) => (prev ? { ...prev, has_badge: !!data.has_badge, has_nfc: !!data.has_nfc } : prev));
+        if (payload.badge) setBadgeCode("");
+        if (payload.nfc) setNfcCode("");
         fetchData();
       }
     } catch (err) {
       setBadgeError("Errore di connessione. Riprova.");
     } finally {
-      setBadgeCode("");
       setBadgeLoading(false);
     }
   };
 
-  const removeBadge = async () => {
+  // kind: "tessera" | "nfc" | "all"
+  const removeBadge = async (kind = "all") => {
     if (!badgeUser) return;
     setBadgeLoading(true);
     setBadgeError("");
     setBadgeDone("");
     try {
-      const response = await fetch(`${API}/users/${badgeUser.user_id}/badge`, {
+      const response = await fetch(`${API}/users/${badgeUser.user_id}/badge?kind=${kind}`, {
         method: "DELETE",
         headers: { Authorization: `Bearer ${token}` },
         credentials: "include"
       });
+      const data = await response.json().catch(() => ({}));
       if (response.ok) {
-        setBadgeDone("Tessera rimossa");
-        setBadgeUser({ ...badgeUser, has_badge: false });
+        setBadgeDone(kind === "tessera" ? "Tessera rimossa" : kind === "nfc" ? "NFC rimosso" : "Tessera e NFC rimossi");
+        setBadgeUser((prev) => (prev ? { ...prev, has_badge: !!data.has_badge, has_nfc: !!data.has_nfc } : prev));
         fetchData();
       } else {
-        setBadgeError("Impossibile rimuovere la tessera");
+        setBadgeError("Impossibile rimuovere");
       }
     } catch (err) {
       setBadgeError("Errore di connessione. Riprova.");
@@ -356,6 +386,8 @@ export default function AdminPanel({ user, token, logout }) {
           location: "",
           calibration_date: "",
           calibration_expiry: "",
+    calibration_error: "",
+    calibration_error_unit: "",
           category: "",
           brand: "",
           family: ""
@@ -380,6 +412,8 @@ export default function AdminPanel({ user, token, logout }) {
       location: instrument.location || "",
       calibration_date: instrument.calibration_date || "",
       calibration_expiry: instrument.calibration_expiry || "",
+      calibration_error: instrument.calibration_error || "",
+      calibration_error_unit: instrument.calibration_error_unit || "",
       category: instrument.category || "",
       brand: instrument.brand || "",
       family: instrument.family || ""
@@ -398,6 +432,8 @@ export default function AdminPanel({ user, token, logout }) {
       location: "",
       calibration_date: "",
       calibration_expiry: "",
+    calibration_error: "",
+    calibration_error_unit: "",
       category: "",
       brand: "",
       family: ""
@@ -712,6 +748,14 @@ export default function AdminPanel({ user, token, logout }) {
                         <ImageIcon size={18} className="mr-2" />
                         Importa foto
                       </Button>
+                      <Button
+                        variant="outline"
+                        onClick={() => setShowBulkEdit(true)}
+                        data-testid="bulk-edit-btn"
+                      >
+                        <Pencil size={18} className="mr-2" />
+                        Modifica da Excel
+                      </Button>
                       <Button 
                         onClick={openNewInstrument}
                         className="bg-blue-600 hover:bg-blue-700 btn-animate"
@@ -942,7 +986,7 @@ export default function AdminPanel({ user, token, logout }) {
                             <TableHead>Nome</TableHead>
                             <TableHead>Email</TableHead>
                             <TableHead>Ruolo</TableHead>
-                            <TableHead>Tessera</TableHead>
+                            <TableHead>Accesso</TableHead>
                             <TableHead className="text-right">Azioni</TableHead>
                           </TableRow>
                         </TableHeader>
@@ -972,10 +1016,13 @@ export default function AdminPanel({ user, token, logout }) {
                                 {getRoleBadge(userItem.role)}
                               </TableCell>
                               <TableCell>
-                                {userItem.has_badge ? (
-                                  <Badge className="bg-green-100 text-green-700 hover:bg-green-100">Assegnata</Badge>
+                                {userItem.has_badge || userItem.has_nfc ? (
+                                  <div className="flex flex-wrap gap-1">
+                                    {userItem.has_badge && <Badge className="bg-green-100 text-green-700 hover:bg-green-100">Tessera</Badge>}
+                                    {userItem.has_nfc && <Badge className="bg-sky-100 text-sky-700 hover:bg-sky-100">NFC</Badge>}
+                                  </div>
                                 ) : (
-                                  <span className="text-slate-400 text-sm">Nessuna</span>
+                                  <span className="text-slate-400 text-sm">Nessuno</span>
                                 )}
                               </TableCell>
                               <TableCell className="text-right">
@@ -1153,6 +1200,37 @@ export default function AdminPanel({ user, token, logout }) {
                 </div>
               </div>
 
+              <div className="grid grid-cols-3 gap-4">
+                <div className="space-y-2 col-span-2">
+                  <Label htmlFor="calibration_error">Errore di taratura</Label>
+                  <Input
+                    id="calibration_error"
+                    inputMode="decimal"
+                    value={instrumentForm.calibration_error}
+                    onChange={(e) => setInstrumentForm({...instrumentForm, calibration_error: e.target.value})}
+                    placeholder="es. +0,002 oppure -0,01"
+                    data-testid="instrument-calibration-error-input"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="calibration_error_unit">Unità</Label>
+                  <Input
+                    id="calibration_error_unit"
+                    list="unita-errore"
+                    value={instrumentForm.calibration_error_unit}
+                    onChange={(e) => setInstrumentForm({...instrumentForm, calibration_error_unit: e.target.value})}
+                    placeholder="mm"
+                    data-testid="instrument-calibration-error-unit-input"
+                  />
+                  <datalist id="unita-errore">
+                    {["mm", "µm", "m", "°", "°C", "g", "kg", "N", "bar", "V", "A", "Ω", "%"].map((u) => <option key={u} value={u} />)}
+                  </datalist>
+                </div>
+              </div>
+              <p className="text-xs text-slate-500 -mt-2">
+                Se lo strumento è tarato, scrivi di quanto sbaglia (con il segno) come risulta dal certificato.
+              </p>
+
               <div className="space-y-2">
                 <Label htmlFor="image_url">URL Immagine</Label>
                 <Input
@@ -1225,42 +1303,87 @@ export default function AdminPanel({ user, token, logout }) {
           <DialogContent aria-describedby={undefined}>
             <DialogHeader>
               <DialogTitle style={{ fontFamily: 'Work Sans' }}>
-                Tessera di {badgeUser ? badgeUser.name : ""}
+                Accesso di {badgeUser ? badgeUser.name : ""}
               </DialogTitle>
               <DialogDescription>
-                Clicca nel campo e passa la tessera sul lettore: il codice viene letto e salvato da solo.
+                Scegli come entra questo utente: con la tessera, con l'NFC o con tutti e due. Ogni codice passato sul lettore viene letto e salvato da solo.
               </DialogDescription>
             </DialogHeader>
 
             <div className="space-y-4">
-              {badgeUser && (
-                <p className="text-sm text-slate-600">
-                  Stato attuale:{" "}
-                  <strong>{badgeUser.has_badge ? "tessera assegnata" : "nessuna tessera"}</strong>
-                  {badgeUser.has_badge && " (passandone una nuova, sostituisce la precedente)"}
-                </p>
+              <div className="grid grid-cols-3 gap-1 p-1 rounded-lg bg-slate-100" role="group" aria-label="Tipo di accesso" data-testid="badge-mode">
+                {[["tessera", "Tessera"], ["nfc", "NFC"], ["both", "Entrambi"]].map(([val, label]) => (
+                  <button
+                    key={val}
+                    type="button"
+                    onClick={() => setBadgeMode(val)}
+                    className={`rounded-md py-1.5 text-sm font-medium transition-colors ${badgeMode === val ? "bg-white shadow text-slate-900" : "text-slate-500 hover:text-slate-800"}`}
+                    data-testid={`badge-mode-${val}`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              {badgeMode !== "nfc" && (
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="font-medium text-slate-700">Tessera (badge)</span>
+                    <span className="flex items-center gap-2">
+                      <span className={badgeUser && badgeUser.has_badge ? "text-green-700" : "text-slate-400"}>
+                        {badgeUser && badgeUser.has_badge ? "assegnata" : "nessuna"}
+                      </span>
+                      {badgeUser && badgeUser.has_badge && (
+                        <button type="button" className="text-red-600 hover:underline" disabled={badgeLoading} onClick={() => removeBadge("tessera")} data-testid="badge-remove-tessera">Rimuovi</button>
+                      )}
+                    </span>
+                  </div>
+                  <Input
+                    autoFocus
+                    placeholder="Passa la tessera sul lettore..."
+                    value={badgeCode}
+                    onChange={(e) => setBadgeCode(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); saveBadge(); } }}
+                    disabled={badgeLoading}
+                    className="font-mono"
+                    data-testid="badge-input"
+                  />
+                </div>
               )}
 
-              <div className="flex gap-2">
-                <Input
-                  autoFocus
-                  placeholder="Passa la tessera sul lettore..."
-                  value={badgeCode}
-                  onChange={(e) => setBadgeCode(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      saveBadge();
-                    }
-                  }}
-                  disabled={badgeLoading}
-                  className="font-mono"
-                  data-testid="badge-input"
-                />
-                <Button onClick={() => saveBadge()} disabled={badgeLoading || badgeCode.trim().length < 4}>
-                  Salva
-                </Button>
-              </div>
+              {badgeMode !== "tessera" && (
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="font-medium text-slate-700">NFC</span>
+                    <span className="flex items-center gap-2">
+                      <span className={badgeUser && badgeUser.has_nfc ? "text-sky-700" : "text-slate-400"}>
+                        {badgeUser && badgeUser.has_nfc ? "assegnato" : "nessuno"}
+                      </span>
+                      {badgeUser && badgeUser.has_nfc && (
+                        <button type="button" className="text-red-600 hover:underline" disabled={badgeLoading} onClick={() => removeBadge("nfc")} data-testid="badge-remove-nfc">Rimuovi</button>
+                      )}
+                    </span>
+                  </div>
+                  <Input
+                    autoFocus={badgeMode === "nfc"}
+                    placeholder="Avvicina il tag NFC al lettore o al telefono..."
+                    value={nfcCode}
+                    onChange={(e) => setNfcCode(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); saveBadge(); } }}
+                    disabled={badgeLoading}
+                    className="font-mono"
+                    data-testid="nfc-input"
+                  />
+                </div>
+              )}
+
+              <p className="text-xs text-slate-500">
+                {badgeMode === "both"
+                  ? "Con \"Entrambi\" l'utente può entrare con la tessera oppure con l'NFC. Passa l'NFC sul lettore (si salva da solo) e scrivi o passa la tessera nel suo campo, poi premi Salva."
+                  : badgeMode === "nfc"
+                    ? "Avvicina il tag NFC al lettore del PC o a un telefono autorizzato: si salva da solo. Un nuovo codice sostituisce il precedente."
+                    : "Passa la tessera sul lettore: si salva da sola. Un nuovo codice sostituisce il precedente."}
+              </p>
 
               {badgeError && (
                 <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">
@@ -1277,22 +1400,33 @@ export default function AdminPanel({ user, token, logout }) {
             </div>
 
             <DialogFooter>
-              {badgeUser && badgeUser.has_badge && (
+              {badgeUser && (badgeUser.has_badge || badgeUser.has_nfc) && (
                 <Button
                   variant="outline"
                   className="text-red-600 border-red-200 hover:bg-red-50"
-                  onClick={removeBadge}
+                  onClick={() => removeBadge("all")}
                   disabled={badgeLoading}
                 >
-                  Rimuovi tessera
+                  Rimuovi tutto
                 </Button>
               )}
               <Button variant="outline" onClick={() => setBadgeUser(null)}>
                 Chiudi
               </Button>
+              <Button onClick={() => saveBadge()} disabled={badgeLoading || (!badgeCode.trim() && !nfcCode.trim())} data-testid="badge-save">
+                Salva
+              </Button>
             </DialogFooter>
           </DialogContent>
         </Dialog>
+
+        <BulkEditDialog
+          open={showBulkEdit}
+          onOpenChange={setShowBulkEdit}
+          token={token}
+          isAdmin={user?.role === "admin"}
+          onDone={fetchData}
+        />
 
         <ImageImportDialog
           open={showImageImport}

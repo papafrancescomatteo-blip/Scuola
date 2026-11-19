@@ -64,6 +64,7 @@ class UserResponse(BaseModel):
     role: str
     picture: Optional[str] = None
     has_badge: bool = False
+    has_nfc: bool = False
     created_at: datetime
 
 class LabEntry(BaseModel):
@@ -82,7 +83,8 @@ class NewsCreate(BaseModel):
     public: bool = True  # visibile anche nella pagina di accesso, senza login
 
 class BadgeData(BaseModel):
-    badge: str
+    badge: str = ""   # codice della tessera (badge)
+    nfc: str = ""     # codice NFC (UID letto dal lettore o dal telefono)
 
 class UserUpdate(BaseModel):
     name: Optional[str] = None
@@ -97,6 +99,8 @@ class InstrumentCreate(BaseModel):
     location: Optional[str] = None
     calibration_date: Optional[str] = None
     calibration_expiry: Optional[str] = None
+    calibration_error: Optional[str] = None        # errore trovato in taratura (es. +0,02)
+    calibration_error_unit: Optional[str] = None   # unita' (mm, um, C, bar...)
     category: Optional[str] = None
     brand: Optional[str] = None
     family: Optional[str] = None
@@ -109,6 +113,8 @@ class InstrumentUpdate(BaseModel):
     location: Optional[str] = None
     calibration_date: Optional[str] = None
     calibration_expiry: Optional[str] = None
+    calibration_error: Optional[str] = None        # errore trovato in taratura (es. +0,02)
+    calibration_error_unit: Optional[str] = None   # unita' (mm, um, C, bar...)
     category: Optional[str] = None
     brand: Optional[str] = None
     family: Optional[str] = None
@@ -125,6 +131,8 @@ class InstrumentResponse(BaseModel):
     location: Optional[str] = None
     calibration_date: Optional[str] = None
     calibration_expiry: Optional[str] = None
+    calibration_error: Optional[str] = None        # errore trovato in taratura (es. +0,02)
+    calibration_error_unit: Optional[str] = None   # unita' (mm, um, C, bar...)
     category: Optional[str] = None
     brand: Optional[str] = None
     family: Optional[str] = None
@@ -178,7 +186,12 @@ def hash_badge(raw: str) -> str:
     return hmac.new(JWT_SECRET.encode("utf-8"), normalize_badge(raw).encode("utf-8"), hashlib.sha256).hexdigest()
 
 def public_user(user: dict) -> dict:
-    return {k: v for k, v in user.items() if k not in ("password_hash", "badge_hash")} | {"has_badge": bool(user.get("badge_hash"))}
+    return {k: v for k, v in user.items() if k not in ("password_hash", "badge_hash", "nfc_hash")} | {"has_badge": bool(user.get("badge_hash")), "has_nfc": bool(user.get("nfc_hash"))}
+
+def code_query(code: str) -> dict:
+    """Un utente puo' avere la tessera, l'NFC o entrambi: il codice letto vale se corrisponde a uno dei due."""
+    h = hash_badge(code)
+    return {"$or": [{"badge_hash": h}, {"nfc_hash": h}]}
 
 def create_jwt_token(user_id: str, email: str, role: str) -> str:
     payload = {
@@ -332,8 +345,8 @@ async def login(user_data: UserLogin, response: Response):
 
 @api_router.post("/auth/badge-login")
 async def badge_login(data: BadgeData):
-    code = normalize_badge(data.badge)
-    user = await db.users.find_one({"badge_hash": hash_badge(code)}, {"_id": 0}) if len(code) >= 4 else None
+    code = normalize_badge(data.badge or data.nfc)
+    user = await db.users.find_one(code_query(code), {"_id": 0}) if len(code) >= 4 else None
     if not user:
         await asyncio.sleep(0.7)  # rallenta i tentativi a caso
         await log_event(None, "accessi", "Accesso con tessera fallito", "Tessera non riconosciuta")
@@ -567,6 +580,8 @@ IMPORT_COLUMNS = [
     ("location", "Ubicazione"),
     ("calibration_date", "Data taratura"),
     ("calibration_expiry", "Scadenza taratura"),
+    ("calibration_error", "Errore taratura"),
+    ("calibration_error_unit", "Unità errore"),
     ("image_url", "URL immagine"),
 ]
 
@@ -582,6 +597,8 @@ IMPORT_ALIASES = {
     "location": ["ubicazione", "posizione", "location"],
     "calibration_date": ["data taratura", "data calibrazione", "calibration_date", "taratura"],
     "calibration_expiry": ["scadenza taratura", "scadenza calibrazione", "scadenza", "calibration_expiry"],
+    "calibration_error": ["errore taratura", "errore", "errore di taratura", "errore calibrazione", "calibration_error"],
+    "calibration_error_unit": ["unità errore", "unita errore", "unità", "unita", "um errore", "calibration_error_unit"],
     "image_url": ["url immagine", "immagine", "image_url", "foto"],
 }
 
@@ -619,15 +636,21 @@ async def import_template(current_user: dict = Depends(require_admin_or_technici
     for cell in ws[1]:
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = PatternFill("solid", fgColor="1E3A8A")
-    ws.append(["121234567890", "MCEX-001", "Micrometro esterno 0-25 mm", "Esempio di descrizione",
-               "Misurazione", "Armadio A", "2026-01-15", "2027-01-15", ""])
-    widths = [20, 16, 32, 36, 18, 18, 18, 18, 30]
-    for i, w in enumerate(widths):
-        ws.column_dimensions[chr(65 + i)].width = w
-    # Codice a barre, matricola e date come testo, per non perdere zeri e formato
-    for col in ("A", "B", "G", "H"):
-        for row in range(2, 502):
-            ws[f"{col}{row}"].number_format = "@"
+    example = {
+        "barcode": "121234567890", "matricola": "MCEX-001", "name": "Micrometro esterno 0-25 mm",
+        "description": "Esempio di descrizione", "category": "Misurazione", "brand": "Mitutoyo", "family": "Micrometri",
+        "location": "Armadio A", "calibration_date": "2026-01-15", "calibration_expiry": "2027-01-15",
+        "calibration_error": "+0,002", "calibration_error_unit": "mm", "image_url": "",
+    }
+    ws.append([example.get(field, "") for field, _ in IMPORT_COLUMNS])
+    text_fields = ("barcode", "matricola", "calibration_date", "calibration_expiry", "calibration_error")
+    for i, (field, _) in enumerate(IMPORT_COLUMNS, start=1):
+        letter = chr(64 + i)
+        ws.column_dimensions[letter].width = 34 if field in ("name", "description") else 18
+        if field in text_fields:
+            # come testo, per non perdere zeri, virgole e formato delle date
+            for row in range(2, 502):
+                ws[f"{letter}{row}"].number_format = "@"
     buffer = io.BytesIO()
     wb.save(buffer)
     return Response(
@@ -735,6 +758,8 @@ async def import_confirm(payload: ImportConfirm, current_user: dict = Depends(re
             "location": item.location,
             "calibration_date": item.calibration_date,
             "calibration_expiry": item.calibration_expiry,
+            "calibration_error": (item.calibration_error or "").strip() or None,
+            "calibration_error_unit": (item.calibration_error_unit or "").strip() or None,
             "category": item.category,
             "brand": (item.brand or None),
             "family": (item.family or "").strip() or None,
@@ -745,6 +770,46 @@ async def import_confirm(payload: ImportConfirm, current_user: dict = Depends(re
         imported += 1
     await log_event(current_user, "strumenti", "Importazione Excel", f"{imported} strumenti importati, {skipped} saltati")
     return {"imported": imported, "skipped": skipped}
+
+@api_router.get("/instruments/calibration-deadlines")
+async def calibration_deadlines(days: int = 30, current_user: dict = Depends(get_current_user)):
+    """Elenco strumenti con taratura scaduta o in scadenza entro `days` giorni (pagina Scadenze tarature)."""
+    days = max(1, min(int(days), 365))
+    today = datetime.now(timezone.utc).date()
+    items = []
+    summary = {"expired": 0, "expiring": 0, "ok": 0, "missing": 0}
+    async for ins in db.instruments.find({}, {"_id": 0}):
+        exp_text = _normalize_date(ins.get("calibration_expiry"))
+        exp = None
+        if exp_text:
+            try:
+                exp = date_type.fromisoformat(exp_text)
+            except ValueError:
+                exp = None
+        if exp is None:
+            state, left = "missing", None
+        else:
+            left = (exp - today).days
+            state = "expired" if left < 0 else ("expiring" if left <= days else "ok")
+        summary[state] += 1
+        items.append({
+            "instrument_id": ins.get("instrument_id"),
+            "name": ins.get("name"),
+            "matricola": ins.get("matricola"),
+            "barcode": ins.get("barcode"),
+            "category": ins.get("category"),
+            "location": ins.get("location"),
+            "status": ins.get("status"),
+            "calibration_date": ins.get("calibration_date"),
+            "calibration_expiry": exp.isoformat() if exp else None,
+            "calibration_error": ins.get("calibration_error"),
+            "calibration_error_unit": ins.get("calibration_error_unit"),
+            "days_left": left,
+            "state": state,
+        })
+    order = {"expired": 0, "expiring": 1, "ok": 2, "missing": 3}
+    items.sort(key=lambda i: (order[i["state"]], i["days_left"] if i["days_left"] is not None else 10**9, (i["name"] or "").lower()))
+    return {"warning_days": days, "today": today.isoformat(), "summary": summary, "items": items}
 
 @api_router.get("/instruments/{instrument_id}")
 async def get_instrument(instrument_id: str, current_user: dict = Depends(get_current_user)):
@@ -778,6 +843,8 @@ async def create_instrument(data: InstrumentCreate, current_user: dict = Depends
         "location": data.location,
         "calibration_date": data.calibration_date,
         "calibration_expiry": data.calibration_expiry,
+        "calibration_error": (data.calibration_error or "").strip() or None,
+        "calibration_error_unit": (data.calibration_error_unit or "").strip() or None,
         "category": data.category,
         "brand": (data.brand or "").strip() or None,
         "family": (data.family or "").strip() or None,
@@ -799,7 +866,7 @@ async def update_instrument(instrument_id: str, data: InstrumentUpdate, current_
         raise HTTPException(status_code=404, detail="Instrument not found")
     
     update_data = {k: v for k, v in data.model_dump().items() if v is not None}
-    for k in ("brand", "family"):
+    for k in ("brand", "family", "calibration_error", "calibration_error_unit"):
         if k in update_data:
             update_data[k] = update_data[k].strip() or None
     
@@ -929,6 +996,7 @@ async def get_users(current_user: dict = Depends(require_admin)):
     
     for user in users:
         user["has_badge"] = bool(user.pop("badge_hash", None))
+        user["has_nfc"] = bool(user.pop("nfc_hash", None))
         if isinstance(user.get("created_at"), str):
             user["created_at"] = datetime.fromisoformat(user["created_at"])
     
@@ -945,34 +1013,53 @@ async def update_user(user_id: str, data: UserUpdate, current_user: dict = Depen
     if update_data:
         await db.users.update_one({"user_id": user_id}, {"$set": update_data})
     
-    updated = await db.users.find_one({"user_id": user_id}, {"_id": 0, "password_hash": 0, "badge_hash": 0})
+    updated = await db.users.find_one({"user_id": user_id}, {"_id": 0, "password_hash": 0, "badge_hash": 0, "nfc_hash": 0})
     changes = ", ".join(f"{k}={v}" for k, v in update_data.items()) or "nessuna modifica"
     await log_event(current_user, "utenti", "Utente modificato", f"{user.get('name')}: {changes}")
     return updated
 
 @api_router.put("/users/{user_id}/badge")
 async def set_user_badge(user_id: str, data: BadgeData, current_user: dict = Depends(require_admin)):
+    """Assegna la tessera (badge), l'NFC o entrambi. Si possono mandare uno o tutti e due i codici."""
     user = await db.users.find_one({"user_id": user_id}, {"_id": 0})
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    code = normalize_badge(data.badge)
-    if len(code) < 4:
-        raise HTTPException(status_code=400, detail="Codice tessera non valido o troppo corto")
-    badge_hash = hash_badge(code)
-    other = await db.users.find_one({"badge_hash": badge_hash, "user_id": {"$ne": user_id}}, {"_id": 0})
-    if other:
-        raise HTTPException(status_code=400, detail=f"Tessera già assegnata a {other.get('name', 'un altro utente')}")
-    await db.users.update_one({"user_id": user_id}, {"$set": {"badge_hash": badge_hash}})
-    await log_event(current_user, "utenti", "Tessera assegnata", f"Utente: {user.get('name')}")
-    return {"message": "Tessera assegnata", "has_badge": True}
+    fields = {}
+    for field, raw, label in (("badge_hash", data.badge, "Tessera"), ("nfc_hash", data.nfc, "NFC")):
+        if not (raw or "").strip():
+            continue
+        code = normalize_badge(raw)
+        if len(code) < 4:
+            raise HTTPException(status_code=400, detail=f"Codice {label} non valido o troppo corto")
+        h = hash_badge(code)
+        other = await db.users.find_one({"$or": [{"badge_hash": h}, {"nfc_hash": h}], "user_id": {"$ne": user_id}}, {"_id": 0})
+        if other:
+            raise HTTPException(status_code=400, detail=f"{label} già assegnato a {other.get('name', 'un altro utente')}")
+        fields[field] = h
+    if not fields:
+        raise HTTPException(status_code=400, detail="Inserisci almeno un codice (tessera o NFC)")
+    await db.users.update_one({"user_id": user_id}, {"$set": fields})
+    what = " e ".join(l for f, l in (("badge_hash", "tessera"), ("nfc_hash", "NFC")) if f in fields)
+    await log_event(current_user, "utenti", f"Assegnato: {what}", f"Utente: {user.get('name')}")
+    updated = await db.users.find_one({"user_id": user_id}, {"_id": 0})
+    return {"message": f"Assegnato: {what}", "has_badge": bool(updated.get("badge_hash")), "has_nfc": bool(updated.get("nfc_hash"))}
 
 @api_router.delete("/users/{user_id}/badge")
-async def remove_user_badge(user_id: str, current_user: dict = Depends(require_admin)):
-    result = await db.users.update_one({"user_id": user_id}, {"$unset": {"badge_hash": ""}})
+async def remove_user_badge(user_id: str, kind: str = "all", current_user: dict = Depends(require_admin)):
+    """kind: tessera | nfc | all"""
+    unset = {}
+    if kind in ("tessera", "all"):
+        unset["badge_hash"] = ""
+    if kind in ("nfc", "all"):
+        unset["nfc_hash"] = ""
+    if not unset:
+        raise HTTPException(status_code=400, detail="Tipo non valido")
+    result = await db.users.update_one({"user_id": user_id}, {"$unset": unset})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="User not found")
-    await log_event(current_user, "utenti", "Tessera rimossa", f"user_id: {user_id}")
-    return {"message": "Tessera rimossa", "has_badge": False}
+    await log_event(current_user, "utenti", "Credenziale rimossa", f"user_id: {user_id} ({kind})")
+    updated = await db.users.find_one({"user_id": user_id}, {"_id": 0})
+    return {"message": "Rimosso", "has_badge": bool(updated.get("badge_hash")), "has_nfc": bool(updated.get("nfc_hash"))}
 
 @api_router.delete("/users/{user_id}")
 async def delete_user(user_id: str, current_user: dict = Depends(require_admin)):
@@ -1671,6 +1758,261 @@ async def get_image(image_id: str):
         media_type=doc.get("content_type", "image/jpeg"),
         headers={"Cache-Control": "public, max-age=86400"},
     )
+
+# ============== MODIFICA DA EXCEL (qualsiasi campo di strumenti, filamenti, destinazioni) ==============
+
+BULK_ENTITIES = {
+    "strumenti": {
+        "label": "Strumenti", "coll": "instruments", "id": "instrument_id", "sheet": "Strumenti",
+        "admin_only": False, "sort": "name",
+        "cols": [
+            ("matricola", "Matricola", "text", True), ("barcode", "Codice a barre", "text", True),
+            ("name", "Nome", "text", True), ("description", "Descrizione", "text", False),
+            ("category", "Categoria", "text", False), ("brand", "Marca", "text", False),
+            ("family", "Famiglia", "text", False), ("location", "Ubicazione", "text", False),
+            ("calibration_date", "Data taratura", "date", False), ("calibration_expiry", "Scadenza taratura", "date", False),
+            ("calibration_error", "Errore taratura", "text", False), ("calibration_error_unit", "Unità errore", "text", False),
+            ("image_url", "URL immagine", "text", False),
+        ],
+        "unique": ["matricola"],
+    },
+    "filamenti": {
+        "label": "Filamenti", "coll": "filament_products", "id": "product_id", "sheet": "Filamenti",
+        "admin_only": False, "sort": "material",
+        "cols": [
+            ("material", "Materiale", "text", True), ("color_name", "Colore", "text", True),
+            ("color_hex", "Codice colore (#RRGGBB)", "hex", False), ("brand", "Marca", "text", False),
+            ("spool_size_g", "Grammi per bobina", "int:100:10000", False), ("min_stock", "Scorta minima (bobine)", "int:0:999", False),
+            ("notes", "Note", "text", False),
+        ],
+        "unique": ["material", "color_name"],
+    },
+    "destinazioni": {
+        "label": "Destinazioni", "coll": "destinations", "id": "destination_id", "sheet": "Destinazioni",
+        "admin_only": True, "sort": "name",
+        "cols": [("name", "Nome", "text", True), ("description", "Descrizione", "text", False)],
+        "unique": ["name"],
+    },
+}
+BULK_ID_HEADER = "ID (non modificare)"
+BULK_MAXLEN = {"name": 120, "description": 600, "notes": 300, "image_url": 600}
+
+def _bulk_entity(entity: str, user: dict) -> dict:
+    cfg = BULK_ENTITIES.get(entity)
+    if not cfg:
+        raise HTTPException(status_code=404, detail="Tipo non valido")
+    if cfg["admin_only"] and user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Solo l'amministratore può modificare questi dati")
+    return cfg
+
+def _bulk_norm(kind: str, value) -> str:
+    """Valore confrontabile (stringa) per un campo."""
+    if value is None:
+        return ""
+    if kind.startswith("int"):
+        try:
+            return str(int(float(str(value).replace(",", "."))))
+        except ValueError:
+            return str(value).strip()
+    text = _cell_to_text(value) or ""
+    if kind == "date":
+        text = _normalize_date(text) or ""
+    if kind == "hex":
+        text = text.lower()
+    return text
+
+def _bulk_parse(content: bytes, cfg: dict) -> list:
+    from openpyxl import load_workbook
+    if len(content) > 8 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="File troppo grande (massimo 8 MB)")
+    try:
+        wb = load_workbook(io.BytesIO(content), data_only=True, read_only=True)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Il file non è un Excel (.xlsx) valido")
+    ws = wb[cfg["sheet"]] if cfg["sheet"] in wb.sheetnames else wb.worksheets[0]
+    rows = ws.iter_rows(values_only=True)
+    header = next(rows, None)
+    if not header:
+        raise HTTPException(status_code=400, detail="Il file è vuoto")
+    norm = [(_cell_to_text(h) or "").strip().lower() for h in header]
+    id_idx = next((i for i, h in enumerate(norm) if h.startswith("id")), None)
+    if id_idx is None:
+        raise HTTPException(status_code=400, detail="Manca la colonna ID: usa il file scaricato dal sito senza toglierla")
+    col_idx = {}
+    for field, label, kind, req in cfg["cols"]:
+        if label.lower() in norm:
+            col_idx[field] = norm.index(label.lower())
+    if not col_idx:
+        raise HTTPException(status_code=400, detail="Non trovo nessuna colonna da modificare: non cambiare i titoli della prima riga")
+    parsed = []
+    for row_number, row in enumerate(rows, start=2):
+        if row is None or all(c is None or str(c).strip() == "" for c in row):
+            continue
+        if len(parsed) >= 5000:
+            raise HTTPException(status_code=400, detail="Troppe righe (massimo 5000)")
+        rid = _cell_to_text(row[id_idx]) if id_idx < len(row) else None
+        values = {f: (row[i] if i < len(row) else None) for f, i in col_idx.items()}
+        parsed.append({"row": row_number, "id": rid, "values": values})
+    wb.close()
+    return parsed
+
+async def _bulk_evaluate(cfg: dict, parsed: list) -> list:
+    coll = db[cfg["coll"]]
+    docs = {d[cfg["id"]]: d for d in await coll.find({}, {"_id": 0}).to_list(10000)}
+    kinds = {f: (k, r, l) for f, l, k, r in cfg["cols"]}
+    # valori finali previsti, per controllare i duplicati dopo le modifiche
+    final = {i: {f: _bulk_norm(kinds[f][0], v) for f, v in d.items() if f in kinds} for i, d in docs.items()}
+    results = []
+    for r in parsed:
+        item = {"row": r["row"], "id": r["id"], "name": None, "status": "unchanged", "message": "", "changes": []}
+        doc = docs.get(r["id"]) if r["id"] else None
+        if not doc:
+            item.update(status="not_found", message="ID non trovato: la riga non corrisponde a nessun elemento")
+            results.append(item)
+            continue
+        item["name"] = doc.get("name") or " ".join(x for x in (doc.get("material"), doc.get("color_name")) if x) or r["id"]
+        errors, changes = [], []
+        for field, raw in r["values"].items():
+            kind, required, label = kinds[field]
+            old = _bulk_norm(kind, doc.get(field))
+            new = _bulk_norm(kind, raw)
+            if new == old:
+                continue
+            if new == "":
+                if required:
+                    errors.append(f"{label} non può essere vuoto")
+                    continue
+                if kind.startswith("int"):
+                    continue  # cella numerica lasciata vuota: nessuna modifica
+                changes.append({"field": field, "label": label, "old": old, "new": "", "value": None})
+                continue
+            value = new
+            if kind == "date":
+                try:
+                    date_type.fromisoformat(new)
+                except ValueError:
+                    errors.append(f"{label}: data non valida ({new}). Usa gg/mm/aaaa")
+                    continue
+            elif kind == "hex":
+                value = _clean_hex(new)
+                if not value:
+                    errors.append(f"{label}: usa il formato #RRGGBB (es. #1e40af)")
+                    continue
+            elif kind.startswith("int"):
+                _, lo, hi = kind.split(":")
+                try:
+                    num = int(float(new.replace(",", ".")))
+                except ValueError:
+                    errors.append(f"{label}: deve essere un numero")
+                    continue
+                if not (int(lo) <= num <= int(hi)):
+                    errors.append(f"{label}: deve essere tra {lo} e {hi}")
+                    continue
+                value, new = num, str(num)
+            else:
+                value = new[:BULK_MAXLEN.get(field, 80)]
+            changes.append({"field": field, "label": label, "old": old, "new": str(value), "value": value})
+        # duplicati (matricola, materiale+colore, nome destinazione)
+        if changes and not errors:
+            fin = dict(final.get(r["id"], {}))
+            for c in changes:
+                fin[c["field"]] = _bulk_norm(kinds[c["field"]][0], c["value"])
+            if any(c["field"] in cfg["unique"] for c in changes):
+                key = tuple(fin.get(f, "").lower() for f in cfg["unique"])
+                clash = next((i for i, v in final.items() if i != r["id"] and tuple(v.get(f, "").lower() for f in cfg["unique"]) == key), None)
+                if clash:
+                    errors.append("Esiste già un altro elemento con gli stessi dati (" + " / ".join(key) + ")")
+                else:
+                    final[r["id"]] = fin
+        if errors:
+            item.update(status="error", message="; ".join(errors))
+        elif changes:
+            item.update(status="changed", changes=changes)
+        results.append(item)
+    return results
+
+@api_router.get("/bulk-edit/{entity}/export")
+async def bulk_edit_export(entity: str, current_user: dict = Depends(require_admin_or_technician)):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    cfg = _bulk_entity(entity, current_user)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = cfg["sheet"]
+    headers = [BULK_ID_HEADER] + [label for _, label, _, _ in cfg["cols"]]
+    ws.append(headers)
+    for i, cell in enumerate(ws[1]):
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="64748B" if i == 0 else "1E3A8A")
+        cell.alignment = Alignment(wrap_text=True, vertical="center")
+    docs = await db[cfg["coll"]].find({}, {"_id": 0}).sort(cfg["sort"], 1).to_list(10000)
+    for d in docs:
+        row = [d.get(cfg["id"])]
+        for field, _, kind, _ in cfg["cols"]:
+            v = d.get(field)
+            row.append(v if kind.startswith("int") and v is not None else (str(v) if v is not None else None))
+        ws.append(row)
+    for idx, (field, label, kind, _) in enumerate(cfg["cols"], start=2):
+        letter = chr(64 + idx)
+        ws.column_dimensions[letter].width = 38 if field in ("name", "description", "notes", "image_url") else 20
+        if not kind.startswith("int"):
+            for r in range(2, len(docs) + 2):
+                ws[f"{letter}{r}"].number_format = "@"
+    ws.column_dimensions["A"].width = 22
+    grey = PatternFill("solid", fgColor="E2E8F0")
+    for r in range(2, len(docs) + 2):
+        ws[f"A{r}"].fill = grey
+    ws.row_dimensions[1].height = 32
+    ws.freeze_panes = "B2"
+    info = wb.create_sheet("Istruzioni")
+    for line in [
+        f"MODIFICA {cfg['label'].upper()} DA EXCEL",
+        "",
+        "1. Cambia il contenuto delle celle che vuoi modificare. Non toccare la colonna ID (grigia) e i titoli della prima riga.",
+        "2. Per svuotare un campo cancella il contenuto della cella.",
+        "3. Le righe che non modifichi restano come sono. Puoi anche cancellare le righe che non ti servono dal file: non vengono eliminate dal sito.",
+        "4. Le date si scrivono gg/mm/aaaa (es. 31/12/2026).",
+        "5. Salva il file e caricalo nel sito: vedrai prima l'elenco di tutte le modifiche e potrai confermare o annullare.",
+        "6. Da qui non si creano né si eliminano elementi: per quello usa il sito o l'importazione da Excel.",
+    ]:
+        info.append([line])
+    info.column_dimensions["A"].width = 130
+    info["A1"].font = Font(bold=True, size=13)
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="modifica_{entity}.xlsx"'},
+    )
+
+@api_router.post("/bulk-edit/{entity}/preview")
+async def bulk_edit_preview(entity: str, file: UploadFile = File(...), current_user: dict = Depends(require_admin_or_technician)):
+    cfg = _bulk_entity(entity, current_user)
+    results = await _bulk_evaluate(cfg, _bulk_parse(await file.read(), cfg))
+    counts = {k: sum(1 for r in results if r["status"] == k) for k in ("changed", "unchanged", "error", "not_found")}
+    counts["fields"] = sum(len(r["changes"]) for r in results)
+    shown = [{k: v for k, v in r.items()} for r in results if r["status"] != "unchanged"]
+    for r in shown:
+        for c in r["changes"]:
+            c.pop("value", None)
+    return {"rows": shown[:1000], "counts": counts, "truncated": len(shown) > 1000}
+
+@api_router.post("/bulk-edit/{entity}/confirm")
+async def bulk_edit_confirm(entity: str, file: UploadFile = File(...), current_user: dict = Depends(require_admin_or_technician)):
+    cfg = _bulk_entity(entity, current_user)
+    results = await _bulk_evaluate(cfg, _bulk_parse(await file.read(), cfg))
+    coll = db[cfg["coll"]]
+    updated, fields, skipped = 0, 0, 0
+    for r in results:
+        if r["status"] == "changed":
+            await coll.update_one({cfg["id"]: r["id"]}, {"$set": {c["field"]: c["value"] for c in r["changes"]}})
+            updated += 1
+            fields += len(r["changes"])
+        elif r["status"] in ("error", "not_found"):
+            skipped += 1
+    await log_event(current_user, cfg["label"].lower(), "Modifica da Excel", f"{updated} righe modificate ({fields} campi), {skipped} saltate")
+    return {"updated": updated, "fields": fields, "skipped": skipped}
 
 # ============== NEWS ==============
 
@@ -2407,7 +2749,7 @@ async def nfc_scan(data: ScanData, request: Request, credentials=Depends(securit
         raise HTTPException(status_code=429, detail="Troppe letture ravvicinate")
     source = "lettore del PC" if from_pc else f"telefono di {actor.get('name') or actor.get('email')}"
     code = normalize_badge(data.uid)
-    user = await db.users.find_one({"badge_hash": hash_badge(code)}, {"_id": 0}) if len(code) >= 4 else None
+    user = await db.users.find_one(code_query(code), {"_id": 0}) if len(code) >= 4 else None
     now_iso = datetime.now(timezone.utc).isoformat()
     if not user:
         await log_event(actor, "laboratorio", "Tessera non riconosciuta", f"Letta dal {source}")
