@@ -1,8 +1,22 @@
-ERRORE DI TARATURA + PAGINA SCADENZE TARATURE
-Copia i file nelle stesse cartelle del progetto (sostituisci), poi commit e push: Render ripubblica da solo. Nessuna variabile da cambiare.
-Contiene anche l'aggiornamento "tessera / NFC / entrambi" (server.py e AdminPanel.jsx sono completi).
+MODALITÀ DEMO (per lo stand)
 
-- Admin -> Strumenti -> modifica: nuovi campi "Errore di taratura" (es. +0,002) e "Unita'" (mm, um, C...).
-- Scheda strumento: mostra l'errore e lo stato della taratura (valida / in scadenza / scaduta).
-- Nuova pagina "Scadenze tarature" nel menu (per tutti gli utenti): scadute, in scadenza (15/30/60/90/180 giorni), valide, senza data.
-- Excel: il modello ha due colonne in piu' (Errore taratura, Unita' errore); i vecchi file senza queste colonne funzionano lo stesso.
+Cosa fa
+- Pannello amministrazione > scheda "Modalità demo" in alto (solo admin).
+- "Attiva demo": il sito fa una copia di sicurezza di tutti i dati. Da quel momento chi prova il sito
+  può aggiungere, modificare e cancellare quello che vuole.
+- "Ripristina dati demo": cancella le prove fatte finora e resta in demo (utile tra un visitatore e l'altro).
+- "Disattiva e ripristina": spegne la demo e i dati tornano esattamente com'erano all'attivazione.
+- Finché è attiva, tutti vedono una fascia arancione "MODALITÀ DEMO" e le email (preventivi/richieste) NON vengono inviate.
+
+File da caricare su GitHub (stessi percorsi):
+  backend/demo_mode.py      (NUOVO)
+  backend/server.py         (sostituisce quello attuale: aggiunge 3 righe)
+  frontend/src/App.js
+  frontend/src/pages/AdminPanel.jsx
+  frontend/src/components/DemoBanner.jsx     (NUOVO)
+  frontend/src/components/DemoModeCard.jsx   (NUOVO)
+
+Da sapere
+- Durante la demo tutto quello che viene registrato (anche i veri ingressi in laboratorio) viene annullato al ripristino.
+- Lo spazio del database gratuito (512 MB) deve poter contenere la copia: il sito rifiuta l'attivazione se i dati superano ~220 MB.
+- Se Render va in pausa durante la demo la demo resta attiva (è salvata nel database): ricordati di spegnerla a fine fiera.

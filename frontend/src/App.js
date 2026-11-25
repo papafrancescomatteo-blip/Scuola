@@ -16,6 +16,7 @@ import Home from "./pages/Home";
 import Richiedi from "./pages/Richiedi";
 import Richieste from "./pages/Richieste";
 import Scadenze from "./pages/Scadenze";
+import DemoBanner from "./components/DemoBanner";
 
 const configuredBackendUrl = process.env.REACT_APP_BACKEND_URL || "";
 const BACKEND_URL = configuredBackendUrl
@@ -183,6 +184,7 @@ function AppRouter() {
 
   return (
     <>
+    <DemoBanner />
     {user && <LabAccessGate user={user} token={token} />}
     <Routes>
       <Route 
